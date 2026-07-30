@@ -1,29 +1,124 @@
+# PhoneNr validation for Table_query
+
+Companion notes for `SIM_PhoneNr_Validation_DEMO.xlsx`. The demo has the same explanation on its
+Readme sheet — this file is here so you can copy the formulas as text.
+
+Assumed layout (header row 1, data from row 2):
+
+| Col | Header |
+|---|---|
+| C | PhoneNr |
+| H | SIM_Country |
+| T | IsPhoneValid |
+| V | PhoneClean ← new helper column |
+
+If your columns sit elsewhere, swap the letters and everything follows.
+
+---
+
+## Step 1 — add a `PhoneClean` helper column (V2)
+
+Splitting normalisation out of the check keeps both formulas readable and avoids repeating the
+`SUBSTITUTE` chain seven times. Hide the column afterwards if you don't want to see it.
+
+```excel
+=IF($C2="","",IF(LEFT(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),""),2)="00",MID(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),""),3,255),SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),"")))
+```
+
+Strips `+`, space, non-breaking space, `-`, `(`, `)`, `.` — then converts a leading `00`
+international prefix to bare digits (`0040…` → `40…`).
+
+## Step 2 — the check, in `IsPhoneValid` (T2)
+
+```excel
+=IF($C2="","",IF(NOT(ISNUMBER($V2+0)),"Invalid characters - digits only (+ ( ) - . and spaces are tolerated)",IF(LEN($V2)<8,"Too short - "&LEN($V2)&" digits (min 8)",IF(LEN($V2)>15,"Too long - "&LEN($V2)&" digits (max 15)",IF($H2="","SIM_Country is empty - cannot check the country code",IF(ISNA(MATCH($H2,tblCountries[Name],0)),"SIM_Country """&$H2&""" not found in tblCountries",IF(LEFT($V2,LEN(TEXT(INDEX(tblCountries[DialCode],MATCH($H2,tblCountries[Name],0)),"0")))<>TEXT(INDEX(tblCountries[DialCode],MATCH($H2,tblCountries[Name],0)),"0"),"Wrong country code - must start with +"&TEXT(INDEX(tblCountries[DialCode],MATCH($H2,tblCountries[Name],0)),"0")&" for "&$H2,"OK")))))))
+```
+
+Returns `""` when PhoneNr is empty, `"OK"` when valid, otherwise a specific message. Checks run in
+this order: digits only → length 8–15 → country present → country known → dial code matches.
+
+`INDEX`/`MATCH` rather than `XLOOKUP` so it works in Excel 2016 and 2019 too.
+
+## Step 3 — conditional formatting
+
+Select `$C$2:$C$2000`, then **Home → Conditional Formatting → New Rule → Use a formula**.
+Add all three, in this order, and repeat the set for `$T$2:$T$2000`.
+
+| # | Formula | Format | Stop If True |
+|---|---|---|---|
+| 1 | `=AND($C2<>"", ISNUMBER(SEARCH("SIM_Country",$T2)))` | fill `FFEB9C`, font `9C5700` | ✔ |
+| 2 | `=AND($C2<>"", $T2<>"", $T2<>"OK")` | fill `FFC7CE`, font `9C0006` bold | ✔ |
+| 3 | `=$T2="OK"` | fill `C6EFCE`, font `006100` | |
+
+Amber is deliberately *not* red: it means the number couldn't be checked because SIM_Country is
+blank or unknown, so the fix belongs in the country cell or the Config sheet, not the phone number.
+
+## Step 4 — Data Validation (optional popup)
+
+Select `$C$2:$C$2000` → **Data → Data Validation → Allow: Custom**, tick *Ignore blank*:
+
+```excel
+=OR($C2="",AND(ISNUMBER(IF(LEFT(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),""),2)="00",MID(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),""),3,255),SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),""))+0),LEN(IF(LEFT(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),""),2)="00",MID(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),""),3,255),SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM($C2&""),"+","")," ",""),"-",""),"(",""),")",""),".",""),CHAR(160),"")))>=8,...))
+```
+
+It's long because it can't reuse `PhoneClean` — see below. Easiest route: **copy cell C2 from the
+demo file and Paste Special → Validation** onto your own PhoneNr column.
+
+Set **Error Alert → Style: Warning** (not Stop), so the user is told but can keep the value and fix
+it later while the red fill keeps flagging it.
+
+Also add a dropdown on SIM_Country (`Allow: List`, source `=Config!$A$2:$A$51`). A typo'd country
+name is the most likely way this whole thing silently stops working.
+
+## Step 5 — format the PhoneNr column as Text
+
+Do this *before* any data goes in, or Excel strips the leading `+` and mangles long numbers.
+
+---
+
+## Three things that will bite you
+
+**Data Validation can't read column T.** At the moment validation fires, T still holds the result
+for the *previous* value — the sheet hasn't recalculated. So the DV formula has to carry its own
+copy of the logic. Change a threshold and you must change it in both places, or just drop the DV
+and rely on the colours.
+
+**Data Validation doesn't fire on paste.** Or on fill-down, or from macros. That's Excel, not a bug
+here. Conditional formatting re-evaluates on every recalculation, so treat the colours as the real
+safety net and the popup as a convenience.
+
+**Structured references are banned in DV and CF.** `tblCountries[Name]` works fine in the column T
+formula but Excel rejects it inside a validation or conditional-formatting rule, which is why those
+use `Config!$A$2:$A$51`. Those ranges are static — widen them if the country list grows.
+
+## Known limits
+
+- **Shared dial codes.** `+1` is the US, Canada and much of the Caribbean; `+7` is Russia and Kazakhstan. A US number validates cleanly as Canada. Separating them needs area-code rules, not dial codes.
+- **Trunk zeros.** `+40 0712…` (dial code plus a national leading `0`) passes the dial-code test but isn't valid E.164. Tell me if your data has this pattern and it's a small addition.
+- **8–15 is global.** Real national numbering plans are narrower and vary per country. Add MinLen/MaxLen columns to tblCountries if you need that precision.
+- **`ISNUMBER(x+0)`** would accept an oddity like `1E5`. Irrelevant for phone data, but it's the one gap in the digits-only test.
+
+## If you're on Excel 365 and want one formula instead of two
+
+`LET` collapses Steps 1 and 2 into a single cell, no helper column:
+
+```excel
 =LET(
-  raw,   [@PhoneNr]&"",
+  raw,   $C2&"",
   c1,    SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM(raw),"+",""),"-","")," ",""),"(",""),")",""),".",""),CHAR(160),""),
   clean, IF(LEFT(c1,2)="00",MID(c1,3,255),c1),
-  dial,  TEXT(IFERROR(XLOOKUP([@SIM_Country],tblCountries[Name],tblCountries[DialCode]),""),"0"),
+  dial,  TEXT(IFERROR(XLOOKUP($H2,tblCountries[Name],tblCountries[DialCode]),""),"0"),
   IFS(
-    raw="",                         "",
-    NOT(ISNUMBER(clean+0)),         "Invalid characters – digits only (+, spaces, dashes, dots are tolerated)",
-    LEN(clean)<8,                   "Too short – "&LEN(clean)&" digits (min 8)",
-    LEN(clean)>15,                  "Too long – "&LEN(clean)&" digits (max 15)",
-    [@SIM_Country]="",              "SIM_Country is empty – cannot check country code",
-    dial="",                        "SIM_Country """&[@SIM_Country]&""" not found in tblCountries",
-    LEFT(clean,LEN(dial))<>dial,    "Wrong country code – must start with +"&dial&" for "&[@SIM_Country],
-    TRUE,                           "OK"
+    raw="",                      "",
+    NOT(ISNUMBER(clean+0)),      "Invalid characters - digits only",
+    LEN(clean)<8,                "Too short - "&LEN(clean)&" digits (min 8)",
+    LEN(clean)>15,               "Too long - "&LEN(clean)&" digits (max 15)",
+    $H2="",                      "SIM_Country is empty",
+    dial="",                     "SIM_Country """&$H2&""" not found in tblCountries",
+    LEFT(clean,LEN(dial))<>dial, "Wrong country code - must start with +"&dial&" for "&$H2,
+    TRUE,                        "OK"
   )
 )
+```
 
-Step 2 — Conditional formatting on PhoneNr
-Select the PhoneNr data range (e.g. $C$2:$C$5000 — a bit beyond the table is fine), then Home → Conditional Formatting → New Rule → Use a formula.
-
-Add these three rules, in this order:
-Rule 1 — hard error (red)
-=AND($C2<>"", $T2<>"", $T2<>"OK", NOT(ISNUMBER(SEARCH("not found in tblCountries",$T2))), NOT(ISNUMBER(SEARCH("SIM_Country is empty",$T2))))
-
-Rule 2 — can't be checked yet (amber)
-=AND($C2<>"", ISNUMBER(SEARCH("SIM_Country",$T2)))
-
-Rule 3 — valid (green, optional)
-=$T2="OK"
+Same behaviour. The demo ships the `INDEX`/`MATCH` version because it also runs on older Excel.
