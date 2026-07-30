@@ -1,0 +1,29 @@
+=LET(
+  raw,   [@PhoneNr]&"",
+  c1,    SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(SUBSTITUTE(TRIM(raw),"+",""),"-","")," ",""),"(",""),")",""),".",""),CHAR(160),""),
+  clean, IF(LEFT(c1,2)="00",MID(c1,3,255),c1),
+  dial,  TEXT(IFERROR(XLOOKUP([@SIM_Country],tblCountries[Name],tblCountries[DialCode]),""),"0"),
+  IFS(
+    raw="",                         "",
+    NOT(ISNUMBER(clean+0)),         "Invalid characters – digits only (+, spaces, dashes, dots are tolerated)",
+    LEN(clean)<8,                   "Too short – "&LEN(clean)&" digits (min 8)",
+    LEN(clean)>15,                  "Too long – "&LEN(clean)&" digits (max 15)",
+    [@SIM_Country]="",              "SIM_Country is empty – cannot check country code",
+    dial="",                        "SIM_Country """&[@SIM_Country]&""" not found in tblCountries",
+    LEFT(clean,LEN(dial))<>dial,    "Wrong country code – must start with +"&dial&" for "&[@SIM_Country],
+    TRUE,                           "OK"
+  )
+)
+
+Step 2 — Conditional formatting on PhoneNr
+Select the PhoneNr data range (e.g. $C$2:$C$5000 — a bit beyond the table is fine), then Home → Conditional Formatting → New Rule → Use a formula.
+
+Add these three rules, in this order:
+Rule 1 — hard error (red)
+=AND($C2<>"", $T2<>"", $T2<>"OK", NOT(ISNUMBER(SEARCH("not found in tblCountries",$T2))), NOT(ISNUMBER(SEARCH("SIM_Country is empty",$T2))))
+
+Rule 2 — can't be checked yet (amber)
+=AND($C2<>"", ISNUMBER(SEARCH("SIM_Country",$T2)))
+
+Rule 3 — valid (green, optional)
+=$T2="OK"
