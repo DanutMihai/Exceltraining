@@ -335,14 +335,14 @@ function applyTextFormat(
     .split(",").map((c) => c.trim().toLowerCase()).filter((c) => c !== "");
   if (wanted.length === 0) { return; }
 
-  const fmt: string[][] = [];
-  for (let i = 0; i < dataRows; i++) { fmt.push(["@"]); }
-
   for (let i = 0; i < headers.length; i++) {
     if (wanted.indexOf(headers[i].toLowerCase()) < 0) { continue; }
+    // setNumberFormat (singular) takes one string and applies it to the whole
+    // range. setNumberFormats (plural) is the string[][] overload - the Office.js
+    // habit of passing a 2D array here is what the type error was pointing at.
     worksheet
       .getRangeByIndexes(headerRowIndex + 1, startColumnIndex + i, dataRows, 1)
-      .setNumberFormat(fmt);
+      .setNumberFormat("@");
   }
 }
 
