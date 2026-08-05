@@ -59,7 +59,9 @@ function main(
   totalExpectedRows: number = 0,
   cellsPerBatch: number = 100000,
   textColumnsCsv: string = "PhoneNr,ICC_ID,IMEI,StartDate",
-  columnsCsv: string = ""
+  columnsCsv: string = "",
+  spareRows: number = 200,
+  deferCalculationRestore: boolean = false
 ): WriteResult {
   const table: ExcelScript.Table = getTargetTable(workbook, tableName);
   const actualTableName: string = table.getName();
@@ -133,9 +135,20 @@ function main(
     normalizedStartRowIndex + receivedRows >= normalizedTotalExpectedRows;
 
   // ---- size the table once ------------------------------------------------
-  const requiredRows: number = normalizedTotalExpectedRows > 0
+  // spareRows are blank rows left INSIDE the table so the user can add items
+  // without having to grow it. A row typed below the table's last row only
+  // joins if Excel's "Include new rows and columns in table" AutoCorrect is on;
+  // when it isn't, the row gets no calculated columns, so no check formulas, so
+  // no colour and no RowErrors - while data validation still fires, because
+  // that is applied to sheet ranges. Confusing to diagnose, trivial to prevent.
+  //
+  // Blank rows cost nothing downstream: every check formula returns "" for
+  // empty input, HasError returns "OK", and the Config gate counts data rows
+  // with COUNTA(Table_query[FirstName]), which ignores them.
+  const normalizedSpareRows: number = Math.max(0, Math.floor(spareRows));
+  const requiredRows: number = (normalizedTotalExpectedRows > 0
     ? normalizedTotalExpectedRows
-    : normalizedStartRowIndex + receivedRows;
+    : normalizedStartRowIndex + receivedRows) + normalizedSpareRows;
 
   if (clearExisting && isFirstChunk) {
     clearDataColumns(worksheet, table, headerRowIndex, startColumnIndex, runs);
@@ -190,8 +203,21 @@ function main(
   // the 120s Run script timeout. If it does, split it into its own Run script
   // action called once after the loop, or drop the calculate() and accept that
   // Excel recalculates on open.
+  //
+  // This now restores UNCONDITIONALLY unless you explicitly opt out. Calculation
+  // mode is stored in the file, so a chunk that sets manual and then fails to
+  // restore ships a workbook stuck in manual mode. The user sees stale check
+  // columns, RowErrors reporting "OK" over bad data, and no conditional
+  // formatting at all - because every CF rule reads those same stale columns.
+  // Only data validation still works, which makes it look like a formatting
+  // bug rather than a calculation one.
+  //
+  // For a multi-chunk run, pass deferCalculationRestore = true on every chunk
+  // except the last, so you pay for one recalculation instead of one per chunk.
+  // Getting that flag wrong costs performance; getting the old isLastChunk
+  // inference wrong corrupted the output.
   let calculationRestored: boolean = false;
-  if (isLastChunk) {
+  if (!deferCalculationRestore || isLastChunk) {
     app.setCalculationMode(ExcelScript.CalculationMode.automatic);
     app.calculate(ExcelScript.CalculationType.fullRebuild);
     calculationRestored = true;
@@ -428,3 +454,459 @@ function createEmptyRow(columnCount: number): CellValue[] {
   for (let i = 0; i < columnCount; i++) { row.push(""); }
   return row;
 }
+/**
+ * CopyRowsIntoTable  —  revised.
+ *
+ * Your script, with four changes. The important one is #1.
+ *
+ *  1. IT NO LONGER WRITES THE CALCULATED COLUMNS.
+ *     The original built a value for every header (columnCount = headers.length
+ *     = 29) and wrote the full width in one setValues(). Columns T and V..AC
+ *     hold your check formulas; writing "" over them replaces the formula with
+ *     a literal. Excel does not restore it. One export and every validation
+ *     column is dead - silently, with the file looking fine until someone
+ *     notices nothing ever turns red.
+ *
+ *     The fix costs almost nothing, because your script already computed the
+ *     answer: `unmatchedHeaders` is exactly the set of columns the payload has
+ *     no data for, which is exactly the set that must not be touched. So now
+ *     the script writes only the columns the payload actually names, in
+ *     contiguous runs, stepping over everything else.
+ *
+ *  2. Calculation mode is managed.
+ *     Without it Excel recalculates the whole sheet after every batch write.
+ *     With your formulas at 60k rows that alone will blow the 120s limit.
+ *
+ *  3. clearExisting clears only the data columns, for the same reason as #1.
+ *
+ *  4. Text columns are forced to "@" before data lands, so 18-22 digit ICC_IDs
+ *     survive. (Send them as JSON *strings* too - an unquoted 19-digit number
+ *     is already truncated by JSON.parse, before the script ever sees it.)
+ *
+ * Rows may be objects keyed by header name (recommended - self-describing, and
+ * how column protection is inferred), or arrays, in which case you must pass
+ * columnsCsv naming the columns in order.
+ */
+
+type CellValue = string | number | boolean;
+type JsonObject = { [key: string]: unknown };
+
+interface WriteResult {
+  requestedTableName: string;
+  actualTableName: string;
+  receivedRows: number;
+  writtenRows: number;
+  startRowIndex: number;
+  totalExpectedRows: number;
+  columnCount: number;
+  writtenColumns: string[];
+  protectedColumns: string[];
+  clearedExistingRows: boolean;
+  calculationRestored: boolean;
+}
+
+function main(
+  workbook: ExcelScript.Workbook,
+  tableName: string,
+  rowsJson: string,
+  clearExisting: boolean = false,
+  startRowIndex: number = 0,
+  totalExpectedRows: number = 0,
+  cellsPerBatch: number = 100000,
+  textColumnsCsv: string = "PhoneNr,ICC_ID,IMEI,StartDate",
+  columnsCsv: string = "",
+  spareRows: number = 200,
+  deferCalculationRestore: boolean = false
+): WriteResult {
+  const table: ExcelScript.Table = getTargetTable(workbook, tableName);
+  const actualTableName: string = table.getName();
+  const worksheet: ExcelScript.Worksheet = table.getWorksheet();
+  const headerRange: ExcelScript.Range = table.getHeaderRowRange();
+  const headerRowIndex: number = headerRange.getRowIndex();
+  const startColumnIndex: number = headerRange.getColumnIndex();
+  const headers: string[] = headerRange
+    .getValues()[0]
+    .map((header) => String(header).trim());
+  const columnCount: number = headers.length;
+
+  const normalizedStartRowIndex: number = Math.max(0, Math.floor(startRowIndex));
+  const normalizedTotalExpectedRows: number = Math.max(0, Math.floor(totalExpectedRows));
+
+  const parsedRows: unknown[] = parseRows(rowsJson);
+  const receivedRows: number = parsedRows.length;
+
+  // ---- which columns is this payload allowed to touch? --------------------
+  const payloadKeys: string[] = columnsCsv.trim() !== ""
+    ? columnsCsv.split(",").map((k) => k.trim()).filter((k) => k !== "")
+    : collectPayloadKeys(parsedRows);
+
+  if (payloadKeys.length === 0) {
+    // An empty chunk with no columnsCsv: nothing to write and no way to know
+    // which columns would have been safe to clear. No-op rather than throw, so
+    // a filter that legitimately returns zero rows doesn't fail the flow.
+    if (receivedRows === 0) {
+      return emptyResult(
+        tableName, actualTableName, normalizedStartRowIndex,
+        normalizedTotalExpectedRows, columnCount, headers
+      );
+    }
+    throw new Error(
+      "Could not determine which columns to write. Send rows as objects keyed " +
+      "by header name, or pass columnsCsv listing the columns in order."
+    );
+  }
+
+  const payloadKeySet: { [key: string]: boolean } = {};
+  for (const key of payloadKeys) { payloadKeySet[key.toLowerCase()] = true; }
+
+  const writableIdx: number[] = [];
+  const writtenColumns: string[] = [];
+  const protectedColumns: string[] = [];
+  for (let i = 0; i < columnCount; i++) {
+    if (payloadKeySet[headers[i].toLowerCase()] === true) {
+      writableIdx.push(i);
+      writtenColumns.push(headers[i]);
+    } else {
+      protectedColumns.push(headers[i]);   // formulas, left alone
+    }
+  }
+  if (writableIdx.length === 0) {
+    throw new Error(
+      "None of the payload keys matched a table header. Payload keys: " +
+      payloadKeys.join(", ") + ". Table headers: " + headers.join(", ")
+    );
+  }
+  const runs: number[][] = contiguousRuns(writableIdx);
+
+  // ---- calculation off for the duration -----------------------------------
+  // Each Run script call is its own session, so this must be re-asserted on
+  // every chunk, not just the first.
+  const app: ExcelScript.Application = workbook.getApplication();
+  app.setCalculationMode(ExcelScript.CalculationMode.manual);
+
+  const isFirstChunk: boolean = normalizedStartRowIndex === 0;
+  const isLastChunk: boolean =
+    normalizedTotalExpectedRows === 0 ||
+    normalizedStartRowIndex + receivedRows >= normalizedTotalExpectedRows;
+
+  // ---- size the table once ------------------------------------------------
+  // spareRows are blank rows left INSIDE the table so the user can add items
+  // without having to grow it. A row typed below the table's last row only
+  // joins if Excel's "Include new rows and columns in table" AutoCorrect is on;
+  // when it isn't, the row gets no calculated columns, so no check formulas, so
+  // no colour and no RowErrors - while data validation still fires, because
+  // that is applied to sheet ranges. Confusing to diagnose, trivial to prevent.
+  //
+  // Blank rows cost nothing downstream: every check formula returns "" for
+  // empty input, HasError returns "OK", and the Config gate counts data rows
+  // with COUNTA(Table_query[FirstName]), which ignores them.
+  const normalizedSpareRows: number = Math.max(0, Math.floor(spareRows));
+  const requiredRows: number = (normalizedTotalExpectedRows > 0
+    ? normalizedTotalExpectedRows
+    : normalizedStartRowIndex + receivedRows) + normalizedSpareRows;
+
+  if (clearExisting && isFirstChunk) {
+    clearDataColumns(worksheet, table, headerRowIndex, startColumnIndex, runs);
+  }
+  ensureTableDataRowCount(
+    table, worksheet, headerRowIndex, startColumnIndex, columnCount,
+    Math.max(requiredRows, receivedRows)
+  );
+
+  if (isFirstChunk) {
+    applyTextFormat(
+      worksheet, headers, headerRowIndex, startColumnIndex,
+      Math.max(1, requiredRows), textColumnsCsv
+    );
+  }
+
+  // ---- write ---------------------------------------------------------------
+  const rowsPerBatch: number = Math.max(
+    1, Math.floor(Math.max(cellsPerBatch, columnCount) / columnCount)
+  );
+  let writtenRows: number = 0;
+
+  for (let offset = 0; offset < receivedRows; offset += rowsPerBatch) {
+    const batchSourceRows: unknown[] = parsedRows.slice(offset, offset + rowsPerBatch);
+    const fullRows: CellValue[][] = [];
+    for (const sourceRow of batchSourceRows) {
+      fullRows.push(buildRowValues(sourceRow, headers, columnCount, payloadKeys));
+    }
+    const top: number =
+      headerRowIndex + 1 + normalizedStartRowIndex + offset;
+
+    // One setValues per contiguous run of writable columns, so the protected
+    // columns in between are never included in a written range.
+    for (const run of runs) {
+      const runStart: number = run[0];
+      const runWidth: number = run[1];
+      const slice: CellValue[][] = fullRows.map(
+        (r) => r.slice(runStart, runStart + runWidth)
+      );
+      worksheet
+        .getRangeByIndexes(top, startColumnIndex + runStart, slice.length, runWidth)
+        .setValues(slice);
+    }
+    writtenRows += fullRows.length;
+  }
+
+  // ---- restore -------------------------------------------------------------
+  // Leaving the workbook in manual mode would deliver a file whose check
+  // columns look empty until the user presses F9.
+  //
+  // WATCH THIS: fullRebuild across a large sheet is the step most likely to hit
+  // the 120s Run script timeout. If it does, split it into its own Run script
+  // action called once after the loop, or drop the calculate() and accept that
+  // Excel recalculates on open.
+  //
+  // This now restores UNCONDITIONALLY unless you explicitly opt out. Calculation
+  // mode is stored in the file, so a chunk that sets manual and then fails to
+  // restore ships a workbook stuck in manual mode. The user sees stale check
+  // columns, RowErrors reporting "OK" over bad data, and no conditional
+  // formatting at all - because every CF rule reads those same stale columns.
+  // Only data validation still works, which makes it look like a formatting
+  // bug rather than a calculation one.
+  //
+  // For a multi-chunk run, pass deferCalculationRestore = true on every chunk
+  // except the last, so you pay for one recalculation instead of one per chunk.
+  // Getting that flag wrong costs performance; getting the old isLastChunk
+  // inference wrong corrupted the output.
+  let calculationRestored: boolean = false;
+  if (!deferCalculationRestore || isLastChunk) {
+    app.setCalculationMode(ExcelScript.CalculationMode.automatic);
+    app.calculate(ExcelScript.CalculationType.fullRebuild);
+    calculationRestored = true;
+  }
+
+  return {
+    requestedTableName: tableName,
+    actualTableName,
+    receivedRows,
+    writtenRows,
+    startRowIndex: normalizedStartRowIndex,
+    totalExpectedRows: normalizedTotalExpectedRows,
+    columnCount,
+    writtenColumns,
+    protectedColumns,
+    clearedExistingRows: clearExisting && isFirstChunk,
+    calculationRestored
+  };
+}
+
+/* ------------------------------------------------------------------------ */
+
+function emptyResult(
+  tableName: string,
+  actualTableName: string,
+  startRowIndex: number,
+  totalExpectedRows: number,
+  columnCount: number,
+  headers: string[]
+): WriteResult {
+  return {
+    requestedTableName: tableName,
+    actualTableName,
+    receivedRows: 0,
+    writtenRows: 0,
+    startRowIndex,
+    totalExpectedRows,
+    columnCount,
+    writtenColumns: [],
+    protectedColumns: headers,
+    clearedExistingRows: false,
+    calculationRestored: false
+  };
+}
+
+function parseRows(rowsJson: string): unknown[] {
+  if (!rowsJson || rowsJson.trim() === "" || rowsJson.trim() === "[]") {
+    return [];
+  }
+  const parsed: unknown = JSON.parse(rowsJson);
+  if (!Array.isArray(parsed)) {
+    throw new Error("rowsJson must be a JSON array string.");
+  }
+  return parsed;
+}
+
+/**
+ * Union of keys across the first 50 object rows, not just the first one.
+ * Power Automate omits null-valued keys, so row 1 alone can under-report and
+ * a column would then be wrongly treated as protected.
+ */
+function collectPayloadKeys(rows: unknown[]): string[] {
+  const seen: { [key: string]: boolean } = {};
+  const keys: string[] = [];
+  const limit: number = Math.min(rows.length, 50);
+  for (let i = 0; i < limit; i++) {
+    if (!isPlainObject(rows[i])) { continue; }
+    for (const key of Object.keys(rows[i] as JsonObject)) {
+      const trimmed: string = key.trim();
+      if (seen[trimmed.toLowerCase()] !== true) {
+        seen[trimmed.toLowerCase()] = true;
+        keys.push(trimmed);
+      }
+    }
+  }
+  return keys;
+}
+
+function contiguousRuns(sortedIdx: number[]): number[][] {
+  const runs: number[][] = [];
+  let start: number = sortedIdx[0];
+  let prev: number = sortedIdx[0];
+  for (let i = 1; i < sortedIdx.length; i++) {
+    if (sortedIdx[i] === prev + 1) { prev = sortedIdx[i]; continue; }
+    runs.push([start, prev - start + 1]);
+    start = sortedIdx[i];
+    prev = sortedIdx[i];
+  }
+  runs.push([start, prev - start + 1]);
+  return runs;
+}
+
+function clearDataColumns(
+  worksheet: ExcelScript.Worksheet,
+  table: ExcelScript.Table,
+  headerRowIndex: number,
+  startColumnIndex: number,
+  runs: number[][]
+): void {
+  const existingDataRows: number = table.getRowCount();
+  if (existingDataRows <= 0) { return; }
+  for (const run of runs) {
+    worksheet
+      .getRangeByIndexes(
+        headerRowIndex + 1, startColumnIndex + run[0], existingDataRows, run[1]
+      )
+      .clear(ExcelScript.ClearApplyTo.contents);
+  }
+}
+
+function ensureTableDataRowCount(
+  table: ExcelScript.Table,
+  worksheet: ExcelScript.Worksheet,
+  headerRowIndex: number,
+  startColumnIndex: number,
+  columnCount: number,
+  requiredDataRows: number
+): void {
+  const safeRequired: number = Math.max(1, requiredDataRows);
+  const current: number = Math.max(1, table.getRowCount());
+  if (current === safeRequired) { return; }
+  table.resize(
+    worksheet.getRangeByIndexes(
+      headerRowIndex, startColumnIndex, safeRequired + 1, columnCount
+    )
+  );
+}
+
+/**
+ * Long digit strings must land in Text-formatted cells or Excel coerces them
+ * to numbers and drops everything past the 15th significant digit.
+ */
+function applyTextFormat(
+  worksheet: ExcelScript.Worksheet,
+  headers: string[],
+  headerRowIndex: number,
+  startColumnIndex: number,
+  dataRows: number,
+  textColumnsCsv: string
+): void {
+  const wanted: string[] = textColumnsCsv
+    .split(",").map((c) => c.trim().toLowerCase()).filter((c) => c !== "");
+  if (wanted.length === 0) { return; }
+
+  for (let i = 0; i < headers.length; i++) {
+    if (wanted.indexOf(headers[i].toLowerCase()) < 0) { continue; }
+    // setNumberFormat (singular) takes one string and applies it to the whole
+    // range. setNumberFormats (plural) is the string[][] overload - the Office.js
+    // habit of passing a 2D array here is what the type error was pointing at.
+    worksheet
+      .getRangeByIndexes(headerRowIndex + 1, startColumnIndex + i, dataRows, 1)
+      .setNumberFormat("@");
+  }
+}
+
+function buildRowValues(
+  row: unknown,
+  headers: string[],
+  columnCount: number,
+  payloadKeys: string[]
+): CellValue[] {
+  if (Array.isArray(row)) {
+    // Array rows are positional against payloadKeys, not against the table.
+    const values: CellValue[] = createEmptyRow(columnCount);
+    for (let i = 0; i < payloadKeys.length && i < row.length; i++) {
+      const target: number = indexOfHeader(headers, payloadKeys[i]);
+      if (target >= 0) { values[target] = normalizeCellValue(row[i]); }
+    }
+    return values;
+  }
+  if (isPlainObject(row)) {
+    const objectRow: JsonObject = row as JsonObject;
+    const keyLookup: { [key: string]: string } = {};
+    for (const key of Object.keys(objectRow)) {
+      keyLookup[key.trim().toLowerCase()] = key;
+    }
+    const values: CellValue[] = [];
+    for (let i = 0; i < headers.length; i++) {
+      const matchedKey: string = keyLookup[headers[i].toLowerCase()];
+      values.push(normalizeCellValue(matchedKey ? objectRow[matchedKey] : ""));
+    }
+    return values;
+  }
+  return createEmptyRow(columnCount);
+}
+
+function indexOfHeader(headers: string[], name: string): number {
+  const target: string = name.trim().toLowerCase();
+  for (let i = 0; i < headers.length; i++) {
+    if (headers[i].toLowerCase() === target) { return i; }
+  }
+  return -1;
+}
+
+function getTargetTable(
+  workbook: ExcelScript.Workbook,
+  requestedTableName: string
+): ExcelScript.Table {
+  const tables: ExcelScript.Table[] = workbook.getTables();
+  if (tables.length === 0) {
+    throw new Error("No Excel tables were found in the workbook used by Run script.");
+  }
+  const wanted: string = requestedTableName.trim().toLowerCase();
+  for (const currentTable of tables) {
+    if (currentTable.getName().trim().toLowerCase() === wanted) { return currentTable; }
+  }
+  // Deliberately NOT falling back to tables[0]. This workbook also contains
+  // tblCountries; silently writing 60,000 rows into the country list because
+  // of a typo in the table name is not a recoverable mistake.
+  let names: string = "";
+  for (let i = 0; i < tables.length; i++) {
+    if (i > 0) { names += ", "; }
+    names += tables[i].getName();
+  }
+  throw new Error(
+    "Requested table '" + requestedTableName + "' was not found. Available tables: " + names
+  );
+}
+
+function isPlainObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeCellValue(value: unknown): CellValue {
+  if (value === null || value === undefined) { return ""; }
+  if (typeof value === "string") { return value; }
+  if (typeof value === "number") { return value; }
+  if (typeof value === "boolean") { return value; }
+  return JSON.stringify(value);
+}
+
+function createEmptyRow(columnCount: number): CellValue[] {
+  const row: CellValue[] = [];
+  for (let i = 0; i < columnCount; i++) { row.push(""); }
+  return row;
+}
+
