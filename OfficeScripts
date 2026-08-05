@@ -1,3 +1,4 @@
+FirstName,LastName,PhoneNr,Plan,ICC_ID,GD_ID,StartDate,SIM_Country,Provider,CostCenter,UBR_Code,Legal entity,IsVR,BAN,SOC,Status,SIM Type,Email,ID,IMEI
 /**
  * CopyRowsIntoTable  —  revised.
  *
