@@ -34,194 +34,212 @@
 /* ------------------------------------------------------------------ types */
 
 interface InventoryItem {
-  id: number;
-  iccId: string;
-  phoneNr: string;
-  // Optional extra fields. Any key matching a table header is diffed against
-  // the workbook value to populate `changes` in the report.
-  [key: string]: unknown;
+    id: number;
+    iccId: string;
+    phoneNr: string;
+    // Optional extra fields. Any key matching a table header is diffed against
+    // the workbook value to populate `changes` in the report.
+    [key: string]: unknown;
 }
 
 interface ImportJob {
-  tableName: string;
-  country: string;        // country scope for this run; rows for others are skipped
-  inventory: InventoryItem[];
-  page: number;           // 0-based
-  pageSize: number;       // rows per call; 2000 is a good starting point
+    tableName: string;
+    country: string;        // country scope for this run; rows for others are skipped
+    inventory: InventoryItem[];
+    page: number;           // 0-based
+    pageSize: number;       // rows per call; 2000 is a good starting point
 }
 
 interface FieldChange { field: string; from: string; to: string; }
 
 interface Decision {
-  excelRow: number;
-  action: "create" | "update";
-  spId: number | null;
-  fields: { [key: string]: string };
+    excelRow: number;
+    action: "create" | "update";
+    spId: number | null;
+    fields: { [key: string]: string };
 }
 
 interface ReportRow {
-  excelRow: number;
-  action: "created" | "updated" | "warning" | "skipped" | "failed";
-  name: string;
-  iccId: string;
-  phoneNr: string;
-  simCountry: string;
-  spId: number | null;
-  matchedOn: string;
-  message: string;
-  changes: FieldChange[];
+    excelRow: number;
+    action: "created" | "updated" | "warning" | "skipped" | "failed";
+    name: string;
+    iccId: string;
+    phoneNr: string;
+    simCountry: string;
+    spId: number | null;
+    matchedOn: string;
+    message: string;
+    changes: FieldChange[];
 }
 
 interface ImportResult {
-  page: number;
-  pageSize: number;
-  totalDataRows: number;
-  rowsInPage: number;
-  hasMore: boolean;
-  counts: { created: number; updated: number; warning: number; skipped: number; failed: number };
-  decisions: Decision[];
-  reportRows: ReportRow[];
+    page: number;
+    pageSize: number;
+    totalDataRows: number;
+    rowsInPage: number;
+    hasMore: boolean;
+    counts: { created: number; updated: number; warning: number; skipped: number; failed: number };
+    decisions: Decision[];
+    reportRows: ReportRow[];
 }
 
 /** Fields pushed to SharePoint. Excludes the check columns and IsPhoneValid. */
 const DATA_FIELDS: string[] = [
-  "FirstName", "LastName", "PhoneNr", "Plan", "ICC_ID", "GD_ID", "StartDate",
-  "SIM_Country", "Provider", "CostCenter", "UBR_Code", "Legal entity", "IsVR",
-  "BAN", "SOC", "Status", "SIM Type", "Email", "ID", "IMEI"
+    "FirstName", "LastName", "PhoneNr", "Plan", "ICC_ID", "GD_ID", "StartDate",
+    "SIM_Country", "Provider", "CostCenter", "UBR_Code", "Legal entity", "IsVR",
+    "BAN", "SOC", "Status", "SIM Type", "Email", "ID", "IMEI"
 ];
 
 /* ------------------------------------------------------------------- main */
 
-function main(workbook: ExcelScript.Workbook, payload: string): ImportResult {
-  const job: ImportJob = JSON.parse(payload);
-  const pageSize: number = Math.max(1, Math.floor(job.pageSize || 2000));
-  const page: number = Math.max(0, Math.floor(job.page || 0));
+/**
+ * Returns the ImportResult as a JSON STRING, not an object.
+ *
+ * Power Automate builds a schema from main's return type, and it cannot
+ * describe an index signature - Decision.fields has dynamic keys, one per
+ * SharePoint column, so the editor rejects it with
+ *     "Type literal contains invalid type 'Unrecognized'".
+ * Enumerating all 20 fields as named properties would work, but "Legal entity"
+ * and "SIM Type" contain spaces and would have to be renamed, which then has to
+ * be undone when building the $batch body.
+ *
+ * A string return sidesteps the schema entirely. In the flow, parse it:
+ *     json(body('Run_script')?['result'])
+ * and everything below is addressable as normal, e.g.
+ *     body('Parse_result')?['decisions']
+ *     body('Parse_result')?['counts']?['failed']
+ */
+function main(workbook: ExcelScript.Workbook, payload: string): string {
+    const job: ImportJob = JSON.parse(payload);
+    const pageSize: number = Math.max(1, Math.floor(job.pageSize || 2000));
+    const page: number = Math.max(0, Math.floor(job.page || 0));
 
-  const table: ExcelScript.Table = workbook.getTable(job.tableName || "Table_query");
-  if (!table) { throw new Error("Table '" + job.tableName + "' not found in the uploaded workbook."); }
+    const table: ExcelScript.Table = workbook.getTable(job.tableName || "Table_query");
+    if (!table) { throw new Error("Table '" + job.tableName + "' not found in the uploaded workbook."); }
 
-  const sheet: ExcelScript.Worksheet = table.getWorksheet();
-  const headerRange: ExcelScript.Range = table.getHeaderRowRange();
-  const headers: string[] = headerRange.getValues()[0].map((h) => String(h).trim());
-  const headerRowIndex: number = headerRange.getRowIndex();
-  const firstColumn: number = headerRange.getColumnIndex();
-  const totalDataRows: number = table.getRowCount();
+    const sheet: ExcelScript.Worksheet = table.getWorksheet();
+    const headerRange: ExcelScript.Range = table.getHeaderRowRange();
+    const headers: string[] = headerRange.getValues()[0].map((h) => String(h).trim());
+    const headerRowIndex: number = headerRange.getRowIndex();
+    const firstColumn: number = headerRange.getColumnIndex();
+    const totalDataRows: number = table.getRowCount();
 
-  const col: { [key: string]: number } = {};
-  for (let i = 0; i < headers.length; i++) { col[headers[i].toLowerCase()] = i; }
-  const at = (row: (string | number | boolean)[], name: string): string => {
-    const i: number = col[name.toLowerCase()];
-    return i === undefined ? "" : cellToText(row[i]);
-  };
+    const col: { [key: string]: number } = {};
+    for (let i = 0; i < headers.length; i++) { col[headers[i].toLowerCase()] = i; }
+    const at = (row: (string | number | boolean)[], name: string): string => {
+        const i: number = col[name.toLowerCase()];
+        return i === undefined ? "" : cellToText(row[i]);
+    };
 
-  const reference: Reference = readConfig(workbook);
+    const reference: Reference = readConfig(workbook);
 
-  // Key: normalised ICC_ID + "|" + normalised PhoneNr. Built once, O(1) lookups.
-  // Doing this join in Power Automate would be a Filter array per row - O(n^2),
-  // which at 60k rows does not finish.
-  const index: Map<string, InventoryItem> = new Map<string, InventoryItem>();
-  for (const item of (job.inventory || [])) {
-    index.set(matchKey(String(item.iccId ?? ""), String(item.phoneNr ?? "")), item);
-  }
-
-  const start: number = page * pageSize;
-  const take: number = Math.max(0, Math.min(pageSize, totalDataRows - start));
-  const counts = { created: 0, updated: 0, warning: 0, skipped: 0, failed: 0 };
-  const decisions: Decision[] = [];
-  const reportRows: ReportRow[] = [];
-
-  if (take > 0) {
-    const block: (string | number | boolean)[][] = sheet
-      .getRangeByIndexes(headerRowIndex + 1 + start, firstColumn, take, headers.length)
-      .getValues();
-
-    for (let r = 0; r < block.length; r++) {
-      const row = block[r];
-      const excelRow: number = headerRowIndex + 2 + start + r;   // 1-based sheet row
-
-      const iccRaw: string = at(row, "ICC_ID");
-      const phoneRaw: string = at(row, "PhoneNr");
-      const country: string = at(row, "SIM_Country");
-      const name: string = (at(row, "FirstName") + " " + at(row, "LastName")).trim();
-
-      // Blank spare rows are not an error, they are just empty.
-      if (iccRaw === "" && phoneRaw === "" && at(row, "FirstName") === "") { continue; }
-
-      // ---- country scope -------------------------------------------------
-      if (country.toLowerCase() !== String(job.country || "").toLowerCase()) {
-        counts.skipped++;
-        reportRows.push({
-          excelRow, action: "skipped", name, iccId: iccRaw, phoneNr: phoneRaw,
-          simCountry: country, spId: null, matchedOn: "-",
-          message: "SIM_Country is " + (country || "empty") + "; this run is scoped to "
-                 + job.country + ".",
-          changes: []
-        });
-        continue;
-      }
-
-      // ---- validation ----------------------------------------------------
-      const verdict: Verdict = validateRow(row, at, reference);
-      if (verdict.errors.length > 0) {
-        counts.failed++;
-        reportRows.push({
-          excelRow, action: "failed", name, iccId: iccRaw, phoneNr: phoneRaw,
-          simCountry: country, spId: null, matchedOn: "-",
-          message: verdict.errors.join("  //  ") + "  Row rejected; nothing written.",
-          changes: []
-        });
-        continue;
-      }
-
-      // ---- match ---------------------------------------------------------
-      const key: string = matchKey(iccRaw, phoneRaw);
-      const hit: InventoryItem = index.get(key);
-      const fields: { [key: string]: string } = {};
-      for (const f of DATA_FIELDS) { fields[f] = at(row, f); }
-
-      const changes: FieldChange[] = hit ? diff(hit, fields) : [];
-      const warned: boolean = verdict.warnings.length > 0;
-
-      if (hit) {
-        decisions.push({ excelRow, action: "update", spId: hit.id, fields });
-        if (warned) { counts.warning++; } else { counts.updated++; }
-        reportRows.push({
-          excelRow, action: warned ? "warning" : "updated", name,
-          iccId: iccRaw, phoneNr: phoneRaw, simCountry: country,
-          spId: hit.id, matchedOn: "ICC_ID + PhoneNr",
-          message: warned
-            ? "Updated. " + verdict.warnings.join("  //  ")
-            : "Item updated.",
-          changes
-        });
-      } else {
-        decisions.push({ excelRow, action: "create", spId: null, fields });
-        if (warned) { counts.warning++; } else { counts.created++; }
-        reportRows.push({
-          excelRow, action: warned ? "warning" : "created", name,
-          iccId: iccRaw, phoneNr: phoneRaw, simCountry: country,
-          spId: null, matchedOn: "-",
-          message: (warned ? verdict.warnings.join("  //  ") + " " : "")
-                 + "No match on ICC_ID + PhoneNr. New list item created.",
-          changes: []
-        });
-      }
+    // Key: normalised ICC_ID + "|" + normalised PhoneNr. Built once, O(1) lookups.
+    // Doing this join in Power Automate would be a Filter array per row - O(n^2),
+    // which at 60k rows does not finish.
+    const index: Map<string, InventoryItem> = new Map<string, InventoryItem>();
+    for (const item of (job.inventory || [])) {
+        index.set(matchKey(String(item.iccId ?? ""), String(item.phoneNr ?? "")), item);
     }
-  }
 
-  return {
-    page, pageSize, totalDataRows, rowsInPage: take,
-    hasMore: start + take < totalDataRows,
-    counts, decisions, reportRows
-  };
+    const start: number = page * pageSize;
+    const take: number = Math.max(0, Math.min(pageSize, totalDataRows - start));
+    const counts = { created: 0, updated: 0, warning: 0, skipped: 0, failed: 0 };
+    const decisions: Decision[] = [];
+    const reportRows: ReportRow[] = [];
+
+    if (take > 0) {
+        const block: (string | number | boolean)[][] = sheet
+            .getRangeByIndexes(headerRowIndex + 1 + start, firstColumn, take, headers.length)
+            .getValues();
+
+        for (let r = 0; r < block.length; r++) {
+            const row = block[r];
+            const excelRow: number = headerRowIndex + 2 + start + r;   // 1-based sheet row
+
+            const iccRaw: string = at(row, "ICC_ID");
+            const phoneRaw: string = at(row, "PhoneNr");
+            const country: string = at(row, "SIM_Country");
+            const name: string = (at(row, "FirstName") + " " + at(row, "LastName")).trim();
+
+            // Blank spare rows are not an error, they are just empty.
+            if (iccRaw === "" && phoneRaw === "" && at(row, "FirstName") === "") { continue; }
+
+            // ---- country scope -------------------------------------------------
+            if (country.toLowerCase() !== String(job.country || "").toLowerCase()) {
+                counts.skipped++;
+                reportRows.push({
+                    excelRow, action: "skipped", name, iccId: iccRaw, phoneNr: phoneRaw,
+                    simCountry: country, spId: null, matchedOn: "-",
+                    message: "SIM_Country is " + (country || "empty") + "; this run is scoped to "
+                        + job.country + ".",
+                    changes: []
+                });
+                continue;
+            }
+
+            // ---- validation ----------------------------------------------------
+            const verdict: Verdict = validateRow(row, at, reference);
+            if (verdict.errors.length > 0) {
+                counts.failed++;
+                reportRows.push({
+                    excelRow, action: "failed", name, iccId: iccRaw, phoneNr: phoneRaw,
+                    simCountry: country, spId: null, matchedOn: "-",
+                    message: verdict.errors.join("  //  ") + "  Row rejected; nothing written.",
+                    changes: []
+                });
+                continue;
+            }
+
+            // ---- match ---------------------------------------------------------
+            const key: string = matchKey(iccRaw, phoneRaw);
+            const hit: InventoryItem = index.get(key);
+            const fields: { [key: string]: string } = {};
+            for (const f of DATA_FIELDS) { fields[f] = at(row, f); }
+
+            const changes: FieldChange[] = hit ? diff(hit, fields) : [];
+            const warned: boolean = verdict.warnings.length > 0;
+
+            if (hit) {
+                decisions.push({ excelRow, action: "update", spId: hit.id, fields });
+                if (warned) { counts.warning++; } else { counts.updated++; }
+                reportRows.push({
+                    excelRow, action: warned ? "warning" : "updated", name,
+                    iccId: iccRaw, phoneNr: phoneRaw, simCountry: country,
+                    spId: hit.id, matchedOn: "ICC_ID + PhoneNr",
+                    message: warned
+                        ? "Updated. " + verdict.warnings.join("  //  ")
+                        : "Item updated.",
+                    changes
+                });
+            } else {
+                decisions.push({ excelRow, action: "create", spId: null, fields });
+                if (warned) { counts.warning++; } else { counts.created++; }
+                reportRows.push({
+                    excelRow, action: warned ? "warning" : "created", name,
+                    iccId: iccRaw, phoneNr: phoneRaw, simCountry: country,
+                    spId: null, matchedOn: "-",
+                    message: (warned ? verdict.warnings.join("  //  ") + " " : "")
+                        + "No match on ICC_ID + PhoneNr. New list item created.",
+                    changes: []
+                });
+            }
+        }
+    }
+
+    const result: ImportResult = {
+        page, pageSize, totalDataRows, rowsInPage: take,
+        hasMore: start + take < totalDataRows,
+        counts, decisions, reportRows
+    };
+    return JSON.stringify(result);
 }
 
 /* -------------------------------------------------------------- reference */
 
 interface Reference {
-  dialByCountry: Map<string, string>;
-  statuses: string[];
-  simTypes: string[];
+    dialByCountry: Map<string, string>;
+    statuses: string[];
+    simTypes: string[];
 }
 
 /**
@@ -230,33 +248,33 @@ interface Reference {
  * rather than hardcoded here.
  */
 function readConfig(workbook: ExcelScript.Workbook): Reference {
-  const dialByCountry: Map<string, string> = new Map<string, string>();
-  const countries: ExcelScript.Table = workbook.getTable("tblCountries");
-  if (countries) {
-    const rows: (string | number | boolean)[][] = countries.getRangeBetweenHeaderAndTotal().getValues();
-    const head: string[] = countries.getHeaderRowRange().getValues()[0].map((h) => String(h).trim().toLowerCase());
-    const ni: number = head.indexOf("name");
-    const di: number = head.indexOf("dialcode");
-    for (const row of rows) {
-      const nm: string = cellToText(row[ni]).trim();
-      const dc: string = cellToText(row[di]).trim();
-      if (nm !== "" && dc !== "") { dialByCountry.set(nm.toLowerCase(), dc); }
+    const dialByCountry: Map<string, string> = new Map<string, string>();
+    const countries: ExcelScript.Table = workbook.getTable("tblCountries");
+    if (countries) {
+        const rows: (string | number | boolean)[][] = countries.getRangeBetweenHeaderAndTotal().getValues();
+        const head: string[] = countries.getHeaderRowRange().getValues()[0].map((h) => String(h).trim().toLowerCase());
+        const ni: number = head.indexOf("name");
+        const di: number = head.indexOf("dialcode");
+        for (const row of rows) {
+            const nm: string = cellToText(row[ni]).trim();
+            const dc: string = cellToText(row[di]).trim();
+            if (nm !== "" && dc !== "") { dialByCountry.set(nm.toLowerCase(), dc); }
+        }
     }
-  }
 
-  const cfg: ExcelScript.Worksheet = workbook.getWorksheet("Config");
-  const readList = (column: number): string[] => {
-    const out: string[] = [];
-    if (!cfg) { return out; }
-    const values: (string | number | boolean)[][] =
-      cfg.getRangeByIndexes(1, column, 20, 1).getValues();
-    for (const v of values) {
-      const s: string = cellToText(v[0]).trim();
-      if (s !== "") { out.push(s); }
-    }
-    return out;
-  };
-  return { dialByCountry, statuses: readList(6), simTypes: readList(7) };  // G, H
+    const cfg: ExcelScript.Worksheet = workbook.getWorksheet("Config");
+    const readList = (column: number): string[] => {
+        const out: string[] = [];
+        if (!cfg) { return out; }
+        const values: (string | number | boolean)[][] =
+            cfg.getRangeByIndexes(1, column, 20, 1).getValues();
+        for (const v of values) {
+            const s: string = cellToText(v[0]).trim();
+            if (s !== "") { out.push(s); }
+        }
+        return out;
+    };
+    return { dialByCountry, statuses: readList(6), simTypes: readList(7) };  // G, H
 }
 
 /* ------------------------------------------------------------- validation */
@@ -264,186 +282,186 @@ function readConfig(workbook: ExcelScript.Workbook): Reference {
 interface Verdict { errors: string[]; warnings: string[]; }
 
 function validateRow(
-  row: (string | number | boolean)[],
-  at: (row: (string | number | boolean)[], name: string) => string,
-  reference: Reference
+    row: (string | number | boolean)[],
+    at: (row: (string | number | boolean)[], name: string) => string,
+    reference: Reference
 ): Verdict {
-  const errors: string[] = [];
-  const warnings: string[] = [];
+    const errors: string[] = [];
+    const warnings: string[] = [];
 
-  // ---- PhoneNr ----------------------------------------------------------
-  const phone: string = normalisePhone(at(row, "PhoneNr"));
-  const country: string = at(row, "SIM_Country");
-  if (phone === "") {
-    errors.push("PhoneNr: empty or contains no digits.");
-  } else if (!isDigits(phone)) {
-    errors.push("PhoneNr: digits only - no letters or symbols.");
-  } else if (phone.length < 8) {
-    errors.push("PhoneNr: Too short - " + phone.length + " digits (min 8).");
-  } else if (phone.length > 15) {
-    errors.push("PhoneNr: Too long - " + phone.length + " digits (max 15).");
-  } else {
-    const dial: string = reference.dialByCountry.get(country.toLowerCase());
-    if (!dial) {
-      warnings.push("WARNING: SIM_Country \"" + country + "\" is not in tblCountries; "
-                  + "the country code could not be checked.");
-    } else if (phone.substring(0, dial.length) !== dial) {
-      errors.push("PhoneNr: wrong country code - must start with +" + dial + " for " + country + ".");
+    // ---- PhoneNr ----------------------------------------------------------
+    const phone: string = normalisePhone(at(row, "PhoneNr"));
+    const country: string = at(row, "SIM_Country");
+    if (phone === "") {
+        errors.push("PhoneNr: empty or contains no digits.");
+    } else if (!isDigits(phone)) {
+        errors.push("PhoneNr: digits only - no letters or symbols.");
+    } else if (phone.length < 8) {
+        errors.push("PhoneNr: Too short - " + phone.length + " digits (min 8).");
+    } else if (phone.length > 15) {
+        errors.push("PhoneNr: Too long - " + phone.length + " digits (max 15).");
+    } else {
+        const dial: string = reference.dialByCountry.get(country.toLowerCase());
+        if (!dial) {
+            warnings.push("WARNING: SIM_Country \"" + country + "\" is not in tblCountries; "
+                + "the country code could not be checked.");
+        } else if (phone.substring(0, dial.length) !== dial) {
+            errors.push("PhoneNr: wrong country code - must start with +" + dial + " for " + country + ".");
+        }
     }
-  }
 
-  // ---- ICC_ID -----------------------------------------------------------
-  const icc: string = at(row, "ICC_ID").trim();
-  if (icc === "") {
-    errors.push("ICC_ID: empty.");
-  } else if (!isDigits(icc)) {
-    errors.push("ICC_ID: digits only - no +, -, spaces or any other character.");
-  } else if (icc.substring(0, 2) !== "89") {
-    errors.push("ICC_ID: must start with 89 (ITU-T E.118 prefix).");
-  } else if (icc.length < 18) {
-    errors.push("ICC_ID: Too short - " + icc.length + " digits (min 18).");
-  } else if (icc.length > 22) {
-    errors.push("ICC_ID: Too long - " + icc.length + " digits (max 22).");
-  } else if (!luhnOk(icc)) {
-    warnings.push("WARNING: ICC_ID failed its Luhn check digit - likely a typo or transposition.");
-  }
-
-  // ---- IMEI (optional field) --------------------------------------------
-  const imei: string = at(row, "IMEI").trim();
-  if (imei !== "") {
-    if (!isDigits(imei)) {
-      errors.push("IMEI: digits only - no +, -, spaces or any other character.");
-    } else if (imei.length !== 15) {
-      errors.push("IMEI: must be exactly 15 digits - this one has " + imei.length + ".");
-    } else if (!luhnOk(imei)) {
-      warnings.push("WARNING: IMEI failed its Luhn check digit - likely a typo or transposition.");
+    // ---- ICC_ID -----------------------------------------------------------
+    const icc: string = at(row, "ICC_ID").trim();
+    if (icc === "") {
+        errors.push("ICC_ID: empty.");
+    } else if (!isDigits(icc)) {
+        errors.push("ICC_ID: digits only - no +, -, spaces or any other character.");
+    } else if (icc.substring(0, 2) !== "89") {
+        errors.push("ICC_ID: must start with 89 (ITU-T E.118 prefix).");
+    } else if (icc.length < 18) {
+        errors.push("ICC_ID: Too short - " + icc.length + " digits (min 18).");
+    } else if (icc.length > 22) {
+        errors.push("ICC_ID: Too long - " + icc.length + " digits (max 22).");
+    } else if (!luhnOk(icc)) {
+        warnings.push("WARNING: ICC_ID failed its Luhn check digit - likely a typo or transposition.");
     }
-  }
 
-  // ---- StartDate ---------------------------------------------------------
-  const dateVerdict: string = checkStartDate(row, at);
-  if (dateVerdict !== "") {
-    if (dateVerdict.indexOf("WARNING:") === 0) { warnings.push(dateVerdict); }
-    else { errors.push("StartDate: " + dateVerdict); }
-  }
+    // ---- IMEI (optional field) --------------------------------------------
+    const imei: string = at(row, "IMEI").trim();
+    if (imei !== "") {
+        if (!isDigits(imei)) {
+            errors.push("IMEI: digits only - no +, -, spaces or any other character.");
+        } else if (imei.length !== 15) {
+            errors.push("IMEI: must be exactly 15 digits - this one has " + imei.length + ".");
+        } else if (!luhnOk(imei)) {
+            warnings.push("WARNING: IMEI failed its Luhn check digit - likely a typo or transposition.");
+        }
+    }
 
-  // ---- Status / SIM Type -------------------------------------------------
-  const status: string = at(row, "Status").trim();
-  if (status !== "" && reference.statuses.length > 0) {
-    if (reference.statuses.indexOf(status) < 0) {
-      const ci: number = indexOfIgnoreCase(reference.statuses, status);
-      if (ci >= 0) {
-        warnings.push("WARNING: Status has the wrong capitalisation - should be \""
+    // ---- StartDate ---------------------------------------------------------
+    const dateVerdict: string = checkStartDate(row, at);
+    if (dateVerdict !== "") {
+        if (dateVerdict.indexOf("WARNING:") === 0) { warnings.push(dateVerdict); }
+        else { errors.push("StartDate: " + dateVerdict); }
+    }
+
+    // ---- Status / SIM Type -------------------------------------------------
+    const status: string = at(row, "Status").trim();
+    if (status !== "" && reference.statuses.length > 0) {
+        if (reference.statuses.indexOf(status) < 0) {
+            const ci: number = indexOfIgnoreCase(reference.statuses, status);
+            if (ci >= 0) {
+                warnings.push("WARNING: Status has the wrong capitalisation - should be \""
                     + reference.statuses[ci] + "\".");
-      } else {
-        errors.push("Status: must be one of " + reference.statuses.join(", ") + ".");
-      }
+            } else {
+                errors.push("Status: must be one of " + reference.statuses.join(", ") + ".");
+            }
+        }
     }
-  }
-  const simType: string = at(row, "SIM Type").trim();
-  if (simType !== "" && reference.simTypes.length > 0) {
-    if (reference.simTypes.indexOf(simType) < 0) {
-      const ci: number = indexOfIgnoreCase(reference.simTypes, simType);
-      if (ci >= 0) {
-        warnings.push("WARNING: SIM Type has the wrong capitalisation - should be \""
+    const simType: string = at(row, "SIM Type").trim();
+    if (simType !== "" && reference.simTypes.length > 0) {
+        if (reference.simTypes.indexOf(simType) < 0) {
+            const ci: number = indexOfIgnoreCase(reference.simTypes, simType);
+            if (ci >= 0) {
+                warnings.push("WARNING: SIM Type has the wrong capitalisation - should be \""
                     + reference.simTypes[ci] + "\".");
-      } else {
-        errors.push("SIM Type: must be one of " + reference.simTypes.join(", ") + ".");
-      }
+            } else {
+                errors.push("SIM Type: must be one of " + reference.simTypes.join(", ") + ".");
+            }
+        }
     }
-  }
 
-  return { errors, warnings };
+    return { errors, warnings };
 }
 
 /** "" when fine, otherwise a message (prefixed WARNING: for non-blocking). */
 function checkStartDate(
-  row: (string | number | boolean)[],
-  at: (row: (string | number | boolean)[], name: string) => string
+    row: (string | number | boolean)[],
+    at: (row: (string | number | boolean)[], name: string) => string
 ): string {
-  const raw: string = at(row, "StartDate").trim();
-  if (raw === "") { return ""; }
+    const raw: string = at(row, "StartDate").trim();
+    if (raw === "") { return ""; }
 
-  // A real Excel date arrives as a serial number.
-  const asNumber: number = Number(raw);
-  if (raw !== "" && !isNaN(asNumber) && raw.indexOf("-") < 0 && raw.indexOf("/") < 0
-      && raw.indexOf(".") < 0 && asNumber > 20000 && asNumber < 80000) {
-    const d: Date = new Date(Date.UTC(1899, 11, 30) + asNumber * 86400000);
-    const year: number = d.getUTCFullYear();
-    if (year < 2000 || year > 2100) {
-      return "WARNING: StartDate is a real date but falls outside 2000-2100 - check the day/month order.";
+    // A real Excel date arrives as a serial number.
+    const asNumber: number = Number(raw);
+    if (raw !== "" && !isNaN(asNumber) && raw.indexOf("-") < 0 && raw.indexOf("/") < 0
+        && raw.indexOf(".") < 0 && asNumber > 20000 && asNumber < 80000) {
+        const d: Date = new Date(Date.UTC(1899, 11, 30) + asNumber * 86400000);
+        const year: number = d.getUTCFullYear();
+        if (year < 2000 || year > 2100) {
+            return "WARNING: StartDate is a real date but falls outside 2000-2100 - check the day/month order.";
+        }
+        return "";
+    }
+
+    if (raw.length !== 10) {
+        return "must be dd-mm-yyyy - 10 characters, this one has " + raw.length + ".";
+    }
+    const s1: string = raw.charAt(2);
+    const s2: string = raw.charAt(5);
+    if (s1 !== s2 || "-/.".indexOf(s1) < 0) {
+        return "separators must be in positions 3 and 6, matching, and be - or / or .";
+    }
+    const dd: string = raw.substring(0, 2);
+    const mm: string = raw.substring(3, 5);
+    const yy: string = raw.substring(6, 10);
+    if (!isDigits(dd) || !isDigits(mm) || !isDigits(yy)) {
+        return "day, month and year must all be digits.";
+    }
+    const day: number = Number(dd), month: number = Number(mm), year: number = Number(yy);
+    if (day < 1 || day > 31) { return "day out of range - dd-mm-yyyy puts the DAY first."; }
+    if (month < 1 || month > 12) { return "month out of range - dd-mm-yyyy puts the MONTH second."; }
+    if (year < 2000 || year > 2100) { return "year out of range (2000-2100)."; }
+    const probe: Date = new Date(Date.UTC(year, month - 1, day));
+    if (probe.getUTCDate() !== day || probe.getUTCMonth() !== month - 1) {
+        return "not a real calendar date (e.g. 31-02).";
     }
     return "";
-  }
-
-  if (raw.length !== 10) {
-    return "must be dd-mm-yyyy - 10 characters, this one has " + raw.length + ".";
-  }
-  const s1: string = raw.charAt(2);
-  const s2: string = raw.charAt(5);
-  if (s1 !== s2 || "-/.".indexOf(s1) < 0) {
-    return "separators must be in positions 3 and 6, matching, and be - or / or .";
-  }
-  const dd: string = raw.substring(0, 2);
-  const mm: string = raw.substring(3, 5);
-  const yy: string = raw.substring(6, 10);
-  if (!isDigits(dd) || !isDigits(mm) || !isDigits(yy)) {
-    return "day, month and year must all be digits.";
-  }
-  const day: number = Number(dd), month: number = Number(mm), year: number = Number(yy);
-  if (day < 1 || day > 31) { return "day out of range - dd-mm-yyyy puts the DAY first."; }
-  if (month < 1 || month > 12) { return "month out of range - dd-mm-yyyy puts the MONTH second."; }
-  if (year < 2000 || year > 2100) { return "year out of range (2000-2100)."; }
-  const probe: Date = new Date(Date.UTC(year, month - 1, day));
-  if (probe.getUTCDate() !== day || probe.getUTCMonth() !== month - 1) {
-    return "not a real calendar date (e.g. 31-02).";
-  }
-  return "";
 }
 
 /* ----------------------------------------------------------------- helpers */
 
 /** Strips + space nbsp - ( ) . then converts a leading 00 to bare digits. */
 function normalisePhone(raw: string): string {
-  let s: string = String(raw == null ? "" : raw).trim();
-  const drop: string[] = ["+", " ", " ", "-", "(", ")", "."];
-  for (const ch of drop) { s = s.split(ch).join(""); }
-  if (s.substring(0, 2) === "00") { s = s.substring(2); }
-  return s;
+    let s: string = String(raw == null ? "" : raw).trim();
+    const drop: string[] = ["+", " ", " ", "-", "(", ")", "."];
+    for (const ch of drop) { s = s.split(ch).join(""); }
+    if (s.substring(0, 2) === "00") { s = s.substring(2); }
+    return s;
 }
 
 function matchKey(icc: string, phone: string): string {
-  return String(icc == null ? "" : icc).trim() + "|" + normalisePhone(phone);
+    return String(icc == null ? "" : icc).trim() + "|" + normalisePhone(phone);
 }
 
 function isDigits(s: string): boolean {
-  if (s.length === 0) { return false; }
-  for (let i = 0; i < s.length; i++) {
-    const c: number = s.charCodeAt(i);
-    if (c < 48 || c > 57) { return false; }
-  }
-  return true;
+    if (s.length === 0) { return false; }
+    for (let i = 0; i < s.length; i++) {
+        const c: number = s.charCodeAt(i);
+        if (c < 48 || c > 57) { return false; }
+    }
+    return true;
 }
 
 /** Luhn mod-10 over the whole string including its trailing check digit. */
 function luhnOk(s: string): boolean {
-  let sum: number = 0;
-  let double: boolean = false;
-  for (let i = s.length - 1; i >= 0; i--) {
-    let d: number = s.charCodeAt(i) - 48;
-    if (double) { d *= 2; if (d > 9) { d -= 9; } }
-    sum += d;
-    double = !double;
-  }
-  return sum % 10 === 0;
+    let sum: number = 0;
+    let double: boolean = false;
+    for (let i = s.length - 1; i >= 0; i--) {
+        let d: number = s.charCodeAt(i) - 48;
+        if (double) { d *= 2; if (d > 9) { d -= 9; } }
+        sum += d;
+        double = !double;
+    }
+    return sum % 10 === 0;
 }
 
 function indexOfIgnoreCase(list: string[], value: string): number {
-  const v: string = value.toLowerCase();
-  for (let i = 0; i < list.length; i++) {
-    if (list[i].toLowerCase() === v) { return i; }
-  }
-  return -1;
+    const v: string = value.toLowerCase();
+    for (let i = 0; i < list.length; i++) {
+        if (list[i].toLowerCase() === v) { return i; }
+    }
+    return -1;
 }
 
 /**
@@ -451,22 +469,22 @@ function indexOfIgnoreCase(list: string[], value: string): number {
  * go through Number(), so everything is stringified without arithmetic.
  */
 function cellToText(v: string | number | boolean): string {
-  if (v === null || v === undefined) { return ""; }
-  if (typeof v === "string") { return v; }
-  if (typeof v === "boolean") { return v ? "TRUE" : "FALSE"; }
-  return String(v);
+    if (v === null || v === undefined) { return ""; }
+    if (typeof v === "string") { return v; }
+    if (typeof v === "boolean") { return v ? "TRUE" : "FALSE"; }
+    return String(v);
 }
 
 /** Diffs the SharePoint item against the workbook row, for the report. */
 function diff(item: InventoryItem, fields: { [key: string]: string }): FieldChange[] {
-  const out: FieldChange[] = [];
-  for (const field of DATA_FIELDS) {
-    if (field === "ID") { continue; }
-    const before: unknown = item[field];
-    if (before === undefined || before === null) { continue; }
-    const from: string = String(before);
-    const to: string = fields[field] === undefined ? "" : fields[field];
-    if (from !== to) { out.push({ field, from, to }); }
-  }
-  return out;
+    const out: FieldChange[] = [];
+    for (const field of DATA_FIELDS) {
+        if (field === "ID") { continue; }
+        const before: unknown = item[field];
+        if (before === undefined || before === null) { continue; }
+        const from: string = String(before);
+        const to: string = fields[field] === undefined ? "" : fields[field];
+        if (from !== to) { out.push({ field, from, to }); }
+    }
+    return out;
 }
