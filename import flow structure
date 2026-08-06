@@ -1,0 +1,342 @@
+# SIM Inventory Import — build spec
+
+Action-by-action. Build top to bottom; every action's name matters because later
+expressions reference it.
+
+**Naming rule:** Power Automate turns spaces into underscores in expressions. Name an action
+`Get inventory` and you reference it as `body('Get_inventory')`. Use the exact names below.
+
+---
+
+## 0. Before you start
+
+Three things that aren't actions but will cost you a day if missed.
+
+**Index the SharePoint columns you filter on.** List settings → Indexed columns → add
+`SIM_Country`. Without it, `Get items` with a filter fails past 5,000 items with the list view
+threshold error. Also index `ICC_ID` if you ever filter on it.
+
+**Set trigger concurrency to 1.** Settings on the trigger → Concurrency Control → On → Degree
+of parallelism `1`. Two people importing the same country simultaneously will both read the
+inventory *before* either writes, so both decide "create" for the same row and you get
+duplicates. This is the single most likely way to corrupt the list.
+
+**Create two libraries:** `SIM Imports/Staging` for uploaded workbooks and `SIM Imports/Reports`
+for the HTML. Keep them out of the library holding the master template.
+
+---
+
+## 1. Trigger — `PowerApps (V2)`
+
+| Input | Type | Name |
+|---|---|---|
+| File | File | `FileContent` |
+| Text | Text | `Country` |
+| Text | Text | `ActionedBy` |
+
+A V2 File input arrives as an object, so the bytes are
+`triggerBody()?['file']?['contentBytes']` and the original name is
+`triggerBody()?['file']?['name']`. Confirm against your first run — the property path depends
+on the input's internal name.
+
+---
+
+## 2. Initialize variables
+
+These must sit at the **root of the flow**. Power Automate refuses `Initialize variable`
+inside a Scope, Condition or loop, which is why they can't be bundled with anything else.
+
+| Name | Type | Value |
+|---|---|---|
+| `varRunId` | String | `guid()` |
+| `varFileName` | String | `concat(formatDateTime(utcNow(),'yyyy-MM-dd_HH-mm-ss'),'_',triggerBody()?['text'],'_SIM_Import_',substring(variables('varRunId'),0,8),'.xlsx')` |
+| `varPage` | Integer | `0` |
+| `varHasMore` | Boolean | `true` |
+| `varReportRows` | Array | `[]` |
+| `varCreated` / `varUpdated` / `varWarning` / `varSkipped` / `varFailed` | Integer | `0` |
+| `varBatchFailures` | Array | `[]` |
+| `varStatus` | String | `Running` |
+
+Separate integer counters rather than one object variable — Power Automate can't increment a
+property inside an object, so a single `varCounts` object means rebuilding the whole thing on
+every page.
+
+---
+
+## 3. `Scope — Main`
+
+Everything from here to the report goes inside one Scope. That's what makes the failure
+handler in §9 possible: a Scope can be configured to run only if a previous Scope failed.
+
+### 3a. `Validate inputs` — Condition
+
+```
+or(empty(triggerBody()?['text']), empty(triggerBody()?['file']?['contentBytes']))
+```
+
+If **true** → `Terminate` with status `Failed` and a message naming what was missing. Cheap,
+and it turns a confusing mid-flow crash into a clear one.
+
+### 3b. `Stage workbook` — SharePoint → Create file
+
+| Field | Value |
+|---|---|
+| Site | your site |
+| Folder Path | `/SIM Imports/Staging` |
+| File Name | `variables('varFileName')` |
+| File Content | `triggerBody()?['file']?['contentBytes']` |
+
+Settings → Retry Policy → **Exponential**, count 4, interval `PT5S`.
+
+Keeping the upload is not optional in a production import — when someone disputes what the
+flow did three weeks later, the exact bytes they submitted are the only real evidence.
+
+---
+
+## 4. `Get inventory` — SharePoint → Get items
+
+| Field | Value |
+|---|---|
+| List | SIM Inventory |
+| Filter Query | `SIM_Country eq '@{triggerBody()?['text']}'` |
+| Top Count | `5000` |
+| Limit Columns by View | a view with **only** ID, ICC_ID, PhoneNr (+ any field you want diffed in the report) |
+
+Settings → **Pagination On**, Threshold `100000`. Retry: exponential, 4.
+
+`Limit Columns by View` matters more than it looks. The default returns every field including
+system ones; on 60,000 items that's the difference between a few MB and a few hundred.
+
+If the country name can contain an apostrophe, escape it: `replace(triggerBody()?['text'],'''','''''')`.
+
+### 4a. `Shape inventory` — Data Operation → Select
+
+**From:** `body('Get_inventory')?['value']`
+**Map** (switch to text mode):
+
+```json
+{
+  "id": @{item()?['ID']},
+  "iccId": "@{item()?['ICC_ID']}",
+  "phoneNr": "@{item()?['PhoneNr']}"
+}
+```
+
+`Select` maps the whole array in one action — no `Apply to each`. This is the difference
+between seconds and hours.
+
+`id` is deliberately unquoted so it stays a number; `iccId` is quoted so an 18–22 digit value
+stays a string and doesn't lose precision.
+
+---
+
+## 5. `Do until — pages`
+
+**Condition:** `variables('varHasMore')` is equal to `false`
+**Limits:** Count `100`, Timeout `PT2H`
+
+The count limit is a fail-safe. If `hasMore` never flips because of a bug, the loop stops
+after 100 pages instead of burning your daily Run script allowance.
+
+### 5a. `Validate and match` — Excel Online (Business) → Run script
+
+| Parameter | Value |
+|---|---|
+| Location / Library / File | the staged file — use the ID returned by `Stage workbook` |
+| Script | `ValidateAndMatchImport` |
+| payload | see below |
+
+```
+@{json(concat('{"tableName":"Table_query","country":"', triggerBody()?['text'],
+  '","page":', variables('varPage'),
+  ',"pageSize":2000,"reportDetail":"exceptions","inventory":',
+  string(body('Shape_inventory')), '}'))}
+```
+
+If the parameter is typed as string, wrap the whole thing in `string(...)` instead of `json(...)`.
+
+Retry: exponential, 4, `PT10S`.
+
+### 5b. `Parse result` — Data Operation → Parse JSON
+
+**Content:** `json(body('Validate_and_match')?['result'])`
+
+The script returns a JSON *string*, because Power Automate can't build a schema for the
+dynamic field keys. Generate the schema from a sample after your first successful run rather
+than hand-writing it.
+
+### 5c. `Do until — batches`
+
+**Condition:** `variables('varBatchOffset')` ≥ `length(body('Parse_result')?['decisions'])`
+(add `varBatchOffset` as another root-level integer, reset to `0` at the top of each page)
+
+Inside:
+
+- **`Compose batch slice`** — `take(skip(body('Parse_result')?['decisions'], variables('varBatchOffset')), 100)`
+- **`Compose batch body`** — the multipart payload (§6)
+- **`Send batch`** — SharePoint → Send an HTTP request to SharePoint
+  - Method `POST`, Uri `_api/$batch`
+  - Headers: `Content-Type: multipart/mixed; boundary=batch_@{variables('varRunId')}`
+  - Body: `outputs('Compose_batch_body')`
+  - Retry: exponential, 4
+- **`Scan batch response`** — check for per-operation failures (§6, and read the warning there)
+- **`Increment varBatchOffset`** by `100`
+
+100 per batch. SharePoint permits up to 1,000, but larger batches time out more often and a
+failure costs you the whole batch.
+
+### 5d. Accumulate
+
+- **`Compose report rows`** — `union(variables('varReportRows'), body('Parse_result')?['reportRows'])`
+- **`Set varReportRows`** ← that Compose
+- **Increment** each counter by `body('Parse_result')?['counts']?['created']` and so on
+- **`Set varHasMore`** ← `body('Parse_result')?['hasMore']`
+- **`Increment varPage`** by `1`
+
+`union` rather than an `Apply to each` with `Append to array variable`: one action per page
+instead of one per row. It does de-duplicate identical objects, but every report row carries a
+unique `excelRow`, so no two are ever identical.
+
+Because `reportDetail` is `exceptions`, only failed and warning rows accumulate here. The
+counts still cover every row, so the report totals reconcile.
+
+---
+
+## 6. The `$batch` body
+
+This is the fiddliest part of the whole flow. Format, exactly — the blank lines are significant:
+
+```
+--batch_<runId>
+Content-Type: multipart/mixed; boundary=changeset_<runId>
+
+--changeset_<runId>
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST https://<tenant>.sharepoint.com/sites/<site>/_api/web/lists/getbytitle('SIM Inventory')/items HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+
+{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"}, "ICC_ID":"...", ...}
+
+--changeset_<runId>--
+--batch_<runId>--
+```
+
+Updates use `POST` to `.../items(<id>)` with headers `IF-MATCH: *` and
+`X-HTTP-Method: MERGE`. `MERGE` only touches the fields you send; `PUT` blanks everything you
+omit, which on this list would wipe two dozen columns.
+
+Three things to get right:
+
+- **`__metadata.type`** — find yours at `_api/web/lists/getbytitle('SIM Inventory')?$select=ListItemEntityTypeFullName`. Spaces in the list name become `_x0020_`.
+- **Internal field names**, not display names. `Legal entity` → `Legal_x0020_entity`, `SIM Type` → `SIM_x0020_Type`. Check at `_api/web/lists/getbytitle('SIM Inventory')/fields?$select=Title,InternalName`.
+- **Never send `ID`** in the body. It's the target, not a field.
+
+⚠️ **`$batch` returns HTTP 200 even when individual operations inside it fail.** The status of
+each sub-operation is in the multipart response body. If you don't parse it, a batch where all
+100 writes were rejected looks like a complete success. Split the response on the boundary
+string and look for lines that aren't `HTTP/1.1 2xx`; append those to `varBatchFailures` with
+the corresponding `excelRow` so they reach the report as failures.
+
+Build this with 3 rows first and inspect the raw response before scaling up.
+
+---
+
+## 7. Build the report
+
+- **`Compose report meta`**
+
+```json
+{
+  "fileName": "@{variables('varFileName')}",
+  "country": "@{triggerBody()?['text']}",
+  "runId": "@{variables('varRunId')}",
+  "startedUtc": "@{triggerBody()?['headers']?['x-ms-workflow-run-start-time']}",
+  "finishedUtc": "@{utcNow()}",
+  "operator": "@{triggerBody()?['text_2']}",
+  "listName": "SIM Inventory",
+  "gate": "@{if(equals(variables('varFailed'),0),'OK','BLOCKED')}"
+}
+```
+
+- **`Compose report json`** — `{ "meta": @{outputs('Compose_report_meta')}, "rows": @{union(variables('varReportRows'), variables('varBatchFailures'))} }`
+- **`Get report template`** — SharePoint → Get file content, `Import_Report_Template.html`
+- **`Compose report html`**
+
+```
+replace(base64ToString(body('Get_report_template')?['$content']), '__REPORT_JSON__', string(outputs('Compose_report_json')))
+```
+
+- **`Save report`** — Create file in `/SIM Imports/Reports`, name `replace(variables('varFileName'),'.xlsx','.html')`
+
+Saving as well as emailing gives you a permanent link, and a fallback when the attachment is
+stripped by a mail gateway.
+
+---
+
+## 8. `Send report` — Office 365 Outlook → Send an email (V2)
+
+| Field | Value |
+|---|---|
+| To | `triggerBody()?['text_2']` (ActionedBy) |
+| Subject | `SIM import — @{triggerBody()?['text']} — @{variables('varFailed')} failed, @{variables('varCreated')} created, @{variables('varUpdated')} updated` |
+| Attachment Name | `replace(variables('varFileName'),'.xlsx','.html')` |
+| Attachment Content | `base64(outputs('Compose_report_html'))` |
+
+Put the counts in the **subject line**. Most people will never open the attachment; the
+subject is the report for them.
+
+Body: a short summary plus the link to the saved copy. Keep the interactive version as the
+attachment — email clients strip JavaScript from message bodies, so pasting the HTML inline
+would give a dead, unfilterable table.
+
+---
+
+## 9. `Scope — Catch`
+
+Configure run after → **has failed**, **is skipped**, **has timed out** on `Scope — Main`.
+
+1. `Set varStatus` → `Failed`
+2. `Send failure email` to ActionedBy **and** to you, with `result('Scope_-_Main')` in the body — that expression returns the status and error of every action inside, which is what you'll actually debug from
+3. `Create item` in an `Import Log` list: runId, country, actionedBy, file name, status, error
+4. `Terminate` with status `Failed`
+
+Without the Terminate, a flow that failed halfway reports success.
+
+---
+
+## 10. Optional but worth it: `Import Log` list
+
+One item per run — RunId, Country, ActionedBy, FileName, Started, Finished, Created, Updated,
+Warning, Skipped, Failed, ReportUrl, Status. Write it at the end of both the main and catch
+paths.
+
+Flow run history expires (28 days on most plans). This list is what lets you answer "who
+changed this SIM and when" a year from now.
+
+---
+
+## Performance at 60,000 rows
+
+| Stage | Calls | Notes |
+|---|---|---|
+| Get inventory | ~12 | 5,000/page, pagination on |
+| Run script | 30 | 2,000 rows per page, well under the 1,600/day cap |
+| $batch writes | ~600 | 100 operations each |
+| **Total** | **~640** | Per-item writes would be 60,000, i.e. 100 minutes of throttle budget alone |
+
+The two things that keep it fast are both structural: `Select` instead of `Apply to each` for
+shaping, and the join living in a `Map` inside the script instead of a `Filter array` per row.
+Get either wrong and no amount of retry tuning will save it.
+
+## Test order
+
+1. 3 rows, one of each outcome. Inspect the raw `$batch` response by hand.
+2. Same 3 rows again — must produce 3 updates and 0 creates. If it creates duplicates, your matching is broken.
+3. A row with a stale ID, a row with a duplicate ICC+phone, a row for another country.
+4. 500 rows, to exercise paging.
+5. Full volume.
+
+Step 2 is the one people skip, and re-runnability is the property you most need.
