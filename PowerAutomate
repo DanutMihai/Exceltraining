@@ -1,0 +1,97 @@
+{
+  "Build_Import_Report_TEST": {
+    "type": "Scope",
+    "description": "Connector-free paste test. Builds the REPORT JSON shape the HTML template expects, using only Compose actions so nothing depends on a connection.",
+    "runAfter": {},
+    "actions": {
+      "Compose_Report_Meta": {
+        "type": "Compose",
+        "runAfter": {},
+        "inputs": {
+          "fileName": "05-08-2026_16-14-20_Romania_SIM_Inventory.xlsx",
+          "country": "Romania",
+          "runId": "@{guid()}",
+          "startedUtc": "@{utcNow()}",
+          "finishedUtc": "@{utcNow()}",
+          "operator": "danutmihai.ilie@gmail.com",
+          "listName": "SIM Inventory",
+          "gate": "OK"
+        }
+      },
+      "Compose_Report_Rows": {
+        "type": "Compose",
+        "runAfter": {
+          "Compose_Report_Meta": [
+            "Succeeded"
+          ]
+        },
+        "inputs": [
+          {
+            "excelRow": 2,
+            "action": "updated",
+            "name": "Ana Popescu",
+            "iccId": "8935201234567890125",
+            "phoneNr": "+40712345678",
+            "simCountry": "Romania",
+            "spId": 1042,
+            "matchedOn": "ICC_ID + PhoneNr",
+            "message": "Item updated.",
+            "changes": [
+              {
+                "field": "Status",
+                "from": "Suspended",
+                "to": "Active"
+              }
+            ]
+          },
+          {
+            "excelRow": 3,
+            "action": "created",
+            "name": "Elena Dumitru",
+            "iccId": "8935201234567890992",
+            "phoneNr": "+40745998877",
+            "simCountry": "Romania",
+            "spId": 1301,
+            "matchedOn": "-",
+            "message": "No match on ICC_ID + PhoneNr. New list item created.",
+            "changes": []
+          },
+          {
+            "excelRow": 4,
+            "action": "skipped",
+            "name": "Lukas Muller",
+            "iccId": "893520123456789012345",
+            "phoneNr": "+4915112345678",
+            "simCountry": "Germany",
+            "spId": null,
+            "matchedOn": "-",
+            "message": "SIM_Country is Germany; this run is scoped to Romania.",
+            "changes": []
+          }
+        ]
+      },
+      "Compose_Report_Json": {
+        "type": "Compose",
+        "runAfter": {
+          "Compose_Report_Rows": [
+            "Succeeded"
+          ]
+        },
+        "inputs": {
+          "meta": "@outputs('Compose_Report_Meta')",
+          "rows": "@outputs('Compose_Report_Rows')"
+        }
+      },
+      "Compose_Report_String": {
+        "type": "Compose",
+        "description": "This is the string that replaces the __REPORT_JSON__ token in the HTML template.",
+        "runAfter": {
+          "Compose_Report_Json": [
+            "Succeeded"
+          ]
+        },
+        "inputs": "@string(outputs('Compose_Report_Json'))"
+      }
+    }
+  }
+}
