@@ -204,43 +204,164 @@ counts still cover every row, so the report totals reconcile.
 
 ## 6. The `$batch` body
 
-This is the fiddliest part of the whole flow. Format, exactly — the blank lines are significant:
+The fiddliest part of the build. Read all of it before writing any of it.
+
+### 6.1 Creates and updates go in the SAME batch
+
+You do **not** need separate create and update branches, and you do not need two `Send batch`
+actions. A single batch carries both. The only differences between the two operations are the
+URL, two headers, and nothing else — so one `Select` can emit both shapes and one HTTP action
+sends them.
+
+**Create** — no ID in the URL, no extra headers:
 
 ```
---batch_<runId>
-Content-Type: multipart/mixed; boundary=changeset_<runId>
-
---changeset_<runId>
-Content-Type: application/http
-Content-Transfer-Encoding: binary
-
 POST https://<tenant>.sharepoint.com/sites/<site>/_api/web/lists/getbytitle('SIM Inventory')/items HTTP/1.1
 Content-Type: application/json;odata=verbose
 Accept: application/json;odata=verbose
 
-{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"}, "ICC_ID":"...", ...}
+{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},"Title":"Popescu","ICC_ID":"8935201234567890125"}
+```
 
---changeset_<runId>--
+**Update** — ID in the URL, plus `IF-MATCH` and `X-HTTP-Method`:
+
+```
+POST https://<tenant>.sharepoint.com/sites/<site>/_api/web/lists/getbytitle('SIM Inventory')/items(1042) HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+IF-MATCH: *
+X-HTTP-Method: MERGE
+
+{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},"ICC_ID":"8935201234567890125","Status":"Active"}
+```
+
+Notes on the update:
+
+- **The method line stays `POST`.** `X-HTTP-Method: MERGE` is the override header; putting
+  `MERGE` on the request line instead is the commonest reason updates 400.
+- **`MERGE`, never `PUT`.** MERGE touches only the fields present in the body. PUT clears every
+  field you omit — on this list that silently blanks two dozen columns.
+- **`IF-MATCH: *`** means "overwrite regardless of version". If you'd rather a concurrent edit
+  cause a failure instead of a silent overwrite, carry the item's `etag` from `Get inventory`
+  and send that instead of `*`. With trigger concurrency set to 1, `*` is fine.
+- **Never send `ID`** in the body of either shape. For an update it's the target, not a field;
+  for a create SharePoint assigns it.
+
+### 6.2 One changeset per operation
+
+A changeset is an atomic unit in OData. Put all 100 writes in one changeset and a single bad
+row can roll back the other 99 — which is exactly the behaviour you don't want, because your
+report is built on per-row outcomes.
+
+So wrap **each** operation in its own changeset. More verbose, but every row succeeds or fails
+independently:
+
+```
+--batch_<runId>
+Content-Type: multipart/mixed; boundary=changeset_<runId>_1
+
+--changeset_<runId>_1
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST .../items(1042) HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+IF-MATCH: *
+X-HTTP-Method: MERGE
+
+{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},"Status":"Active"}
+
+--changeset_<runId>_1--
+--batch_<runId>
+Content-Type: multipart/mixed; boundary=changeset_<runId>_2
+
+--changeset_<runId>_2
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST .../items HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+
+{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},"FirstName":"Elena"}
+
+--changeset_<runId>_2--
 --batch_<runId>--
 ```
 
-Updates use `POST` to `.../items(<id>)` with headers `IF-MATCH: *` and
-`X-HTTP-Method: MERGE`. `MERGE` only touches the fields you send; `PUT` blanks everything you
-omit, which on this list would wipe two dozen columns.
+Blank lines are **significant** — one after each header block, one after the changeset
+declaration. Line endings must be CRLF. The final boundary of each changeset and of the batch
+itself gets a trailing `--`.
 
-Three things to get right:
+**Verify this rather than trust it.** Build a batch of 3 where the middle row is deliberately
+invalid (e.g. a Status value the column rejects) and confirm rows 1 and 3 still commit. If
+they don't, your changesets aren't isolating and the structure is wrong. Do this before
+scaling up — it takes ten minutes and it's the difference between "12 rows failed" and "the
+whole import silently rolled back".
 
-- **`__metadata.type`** — find yours at `_api/web/lists/getbytitle('SIM Inventory')?$select=ListItemEntityTypeFullName`. Spaces in the list name become `_x0020_`.
-- **Internal field names**, not display names. `Legal entity` → `Legal_x0020_entity`, `SIM Type` → `SIM_x0020_Type`. Check at `_api/web/lists/getbytitle('SIM Inventory')/fields?$select=Title,InternalName`.
-- **Never send `ID`** in the body. It's the target, not a field.
+### 6.3 Building the string in Power Automate
 
-⚠️ **`$batch` returns HTTP 200 even when individual operations inside it fail.** The status of
-each sub-operation is in the multipart response body. If you don't parse it, a batch where all
-100 writes were rejected looks like a complete success. Split the response on the boundary
-string and look for lines that aren't `HTTP/1.1 2xx`; append those to `varBatchFailures` with
-the corresponding `excelRow` so they reach the report as failures.
+Don't loop. Use a `Select` to turn each decision into its sub-request string, then `join`.
 
-Build this with 3 rows first and inspect the raw response before scaling up.
+**`Select batch parts`** — From: `outputs('Compose_batch_slice')`, single text-mode output:
+
+```
+--batch_@{variables('varRunId')}
+Content-Type: multipart/mixed; boundary=changeset_@{variables('varRunId')}_@{item()?['excelRow']}
+
+--changeset_@{variables('varRunId')}_@{item()?['excelRow']}
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST @{concat('https://<tenant>.sharepoint.com/sites/<site>/_api/web/lists/getbytitle(''SIM Inventory'')/items', if(equals(item()?['action'],'update'), concat('(',item()?['spId'],')'), ''))} HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+@{if(equals(item()?['action'],'update'), 'IF-MATCH: *
+X-HTTP-Method: MERGE', '')}
+
+@{concat('{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},', substring(string(item()?['fields']), 1))}
+
+--changeset_@{variables('varRunId')}_@{item()?['excelRow']}--
+```
+
+That last expression takes the `fields` object the script returned, drops its opening `{` with
+`substring(..., 1)`, and prepends the `__metadata` block — giving a valid body without
+enumerating 20 fields by hand.
+
+Using `excelRow` as the changeset suffix is deliberate: when you parse the response, the
+boundary tells you which spreadsheet row each result belongs to. Without that you're matching
+responses to requests by position and praying nothing reordered.
+
+**`Compose batch body`** — `@{concat(join(outputs('Select_batch_parts'), ''), '--batch_', variables('varRunId'), '--')}`
+
+### 6.4 Two lookups you must do once
+
+- **`__metadata.type`** — GET `_api/web/lists/getbytitle('SIM Inventory')?$select=ListItemEntityTypeFullName`. Spaces become `_x0020_`, so "SIM Inventory" gives `SP.Data.SIM_x0020_InventoryListItem`. Guessing this wrong 400s every operation.
+- **Internal field names**, not display names — GET `_api/web/lists/getbytitle('SIM Inventory')/fields?$select=Title,InternalName&$filter=Hidden eq false`. `Legal entity` → `Legal_x0020_entity`, `SIM Type` → `SIM_x0020_Type`. Build the display→internal map once and keep it in a `Compose` at the top of the flow.
+
+The script returns `fields` keyed by **Excel header name**. Either translate in the `Select`
+that builds `fieldsJson`, or rename the columns in SharePoint so they match. Translating is
+safer; renaming breaks any existing view or flow that references the old names.
+
+### 6.5 ⚠️ Parsing the response — the trap
+
+**`$batch` returns HTTP 200 even when every operation inside it failed.** Power Automate marks
+the action green and moves on. A batch where all 100 writes were rejected looks identical to
+one where all 100 succeeded.
+
+The per-operation status lives in the multipart response body. After `Send batch`:
+
+1. `Compose` the response body as a string
+2. `split()` it on `--changesetresponse_` (or on the batch boundary in the response — inspect a real one, the names differ from what you sent)
+3. Each part contains a line like `HTTP/1.1 204 No Content` for success or `HTTP/1.1 400 Bad Request` followed by an `error` JSON object
+4. `Filter array` for parts not containing `HTTP/1.1 2`
+5. For each failure, append to `varBatchFailures` a report row shaped like the script's output — `excelRow` recovered from the changeset boundary, `action: "failed"`, and the SharePoint error message
+
+That array is unioned into the report in §7, so batch-level failures surface next to validation
+failures instead of vanishing.
+
+If you skip this step, everything else in this document is decoration.
 
 ---
 
