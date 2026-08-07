@@ -216,23 +216,23 @@ sends them.
 **Create** — no ID in the URL, no extra headers:
 
 ```
-POST https://<tenant>.sharepoint.com/sites/<site>/_api/web/lists/getbytitle('SIM Inventory')/items HTTP/1.1
+POST https://deutschebank.sharepoint.com/sites/simri/_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/items HTTP/1.1
 Content-Type: application/json;odata=verbose
 Accept: application/json;odata=verbose
 
-{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},"Title":"Popescu","ICC_ID":"8935201234567890125"}
+{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},"Title":"Popescu","ICC_ID":"8935201234567890125"}
 ```
 
 **Update** — ID in the URL, plus `IF-MATCH` and `X-HTTP-Method`:
 
 ```
-POST https://<tenant>.sharepoint.com/sites/<site>/_api/web/lists/getbytitle('SIM Inventory')/items(1042) HTTP/1.1
+POST https://deutschebank.sharepoint.com/sites/simri/_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/items(1042) HTTP/1.1
 Content-Type: application/json;odata=verbose
 Accept: application/json;odata=verbose
 IF-MATCH: *
 X-HTTP-Method: MERGE
 
-{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},"ICC_ID":"8935201234567890125","Status":"Active"}
+{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},"ICC_ID":"8935201234567890125","Status":"Active"}
 ```
 
 Notes on the update:
@@ -270,7 +270,7 @@ Accept: application/json;odata=verbose
 IF-MATCH: *
 X-HTTP-Method: MERGE
 
-{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},"Status":"Active"}
+{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},"Status":"Active"}
 
 --changeset_<runId>_1--
 --batch_<runId>
@@ -284,7 +284,7 @@ POST .../items HTTP/1.1
 Content-Type: application/json;odata=verbose
 Accept: application/json;odata=verbose
 
-{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},"FirstName":"Elena"}
+{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},"FirstName":"Elena"}
 
 --changeset_<runId>_2--
 --batch_<runId>--
@@ -314,13 +314,13 @@ Content-Type: multipart/mixed; boundary=changeset_@{variables('varRunId')}_@{ite
 Content-Type: application/http
 Content-Transfer-Encoding: binary
 
-POST @{concat('https://<tenant>.sharepoint.com/sites/<site>/_api/web/lists/getbytitle(''SIM Inventory'')/items', if(equals(item()?['action'],'update'), concat('(',item()?['spId'],')'), ''))} HTTP/1.1
+POST @{concat('https://deutschebank.sharepoint.com/sites/simri/_api/web/lists(guid''6b659861-abd0-4e45-b74e-63e3f69f2648'')/items', if(equals(item()?['action'],'update'), concat('(',item()?['spId'],')'), ''))} HTTP/1.1
 Content-Type: application/json;odata=verbose
 Accept: application/json;odata=verbose
 @{if(equals(item()?['action'],'update'), 'IF-MATCH: *
 X-HTTP-Method: MERGE', '')}
 
-@{concat('{"__metadata":{"type":"SP.Data.SIM_x0020_InventoryListItem"},', substring(string(item()?['fields']), 1))}
+@{concat('{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},', substring(string(item()?['fields']), 1))}
 
 --changeset_@{variables('varRunId')}_@{item()?['excelRow']}--
 ```
@@ -337,8 +337,8 @@ responses to requests by position and praying nothing reordered.
 
 ### 6.4 Two lookups you must do once
 
-- **`__metadata.type`** — GET `_api/web/lists/getbytitle('SIM Inventory')?$select=ListItemEntityTypeFullName`. Spaces become `_x0020_`, so "SIM Inventory" gives `SP.Data.SIM_x0020_InventoryListItem`. Guessing this wrong 400s every operation.
-- **Internal field names**, not display names — GET `_api/web/lists/getbytitle('SIM Inventory')/fields?$select=Title,InternalName&$filter=Hidden eq false`. `Legal entity` → `Legal_x0020_entity`, `SIM Type` → `SIM_x0020_Type`. Build the display→internal map once and keep it in a `Compose` at the top of the flow.
+- **`__metadata.type`** — GET `_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')?$select=ListItemEntityTypeFullName`. Spaces become `_x0020_`, so "SIM Inventory" gives `SP.Data.Global_x0020_SIM_x0020_InventoryListItem`. Guessing this wrong 400s every operation.
+- **Internal field names**, not display names — GET `_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/fields?$select=Title,InternalName,TypeAsString&$filter=Hidden eq false and ReadOnlyField eq false`. `Legal entity` → `Legal_x0020_entity`, `SIM Type` → `SIM_x0020_Type`. Build the display→internal map once and keep it in a `Compose` at the top of the flow.
 
 The script returns `fields` keyed by **Excel header name**. Either translate in the `Select`
 that builds `fieldsJson`, or rename the columns in SharePoint so they match. Translating is
