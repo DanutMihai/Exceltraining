@@ -1,0 +1,187 @@
+# `Compose batch body` — worked example
+
+Uses your real site, list GUID and entity type. The only literals are those three plus the
+boundary names; everything else comes from the decision objects the script returned.
+
+**Why two Selects instead of one with an `if()`:** a create and an update differ by two header
+lines. Expressing that as a conditional inside the template means building the newlines with
+`decodeUriComponent('%0D%0A')`, because Power Automate won't accept a literal line break inside
+an `if()`. Two fixed templates keep every newline literal, and when a batch 400s you can read
+the template and see exactly what it emits.
+
+Actions, in order, inside `Do until — batches`:
+
+---
+
+## 1. `Compose batch slice`
+
+```
+take(skip(body('Parse_result')?['decisions'], variables('varBatchOffset')), 100)
+```
+
+## 2. `Filter updates` — Data Operation → Filter array
+
+**From:** `outputs('Compose_batch_slice')`
+**Condition:** `item()?['action']` **is equal to** `update`
+
+## 3. `Filter creates` — Data Operation → Filter array
+
+**From:** `outputs('Compose_batch_slice')`
+**Condition:** `item()?['action']` **is equal to** `create`
+
+---
+
+## 4. `Select update parts`
+
+**From:** `body('Filter_updates')`
+Switch the map to **text mode** (the icon at the right of the Map box) and paste this as the
+single value. Line breaks are literal — type them, don't encode them.
+
+```
+--batch_@{variables('varRunId')}
+Content-Type: multipart/mixed; boundary=changeset_@{variables('varRunId')}_@{item()?['excelRow']}
+
+--changeset_@{variables('varRunId')}_@{item()?['excelRow']}
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST https://deutschebank.sharepoint.com/sites/simri/_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/items(@{item()?['spId']}) HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+IF-MATCH: *
+X-HTTP-Method: MERGE
+
+@{concat('{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},', substring(string(item()?['fields']), 1))}
+
+--changeset_@{variables('varRunId')}_@{item()?['excelRow']}--
+```
+
+## 5. `Select create parts`
+
+**From:** `body('Filter_creates')`
+
+Identical except: no `(@{item()?['spId']})` on the URL, and no `IF-MATCH` / `X-HTTP-Method`
+lines.
+
+```
+--batch_@{variables('varRunId')}
+Content-Type: multipart/mixed; boundary=changeset_@{variables('varRunId')}_@{item()?['excelRow']}
+
+--changeset_@{variables('varRunId')}_@{item()?['excelRow']}
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST https://deutschebank.sharepoint.com/sites/simri/_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/items HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+
+@{concat('{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},', substring(string(item()?['fields']), 1))}
+
+--changeset_@{variables('varRunId')}_@{item()?['excelRow']}--
+```
+
+### The `fields` expression
+
+```
+concat('{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},', substring(string(item()?['fields']), 1))
+```
+
+`string(item()?['fields'])` gives `{"FirstName":"Ana","LastName":"Popescu",...}`.
+`substring(..., 1)` drops the leading `{`. Prepending the `__metadata` block produces a valid
+body without listing 20 fields by hand.
+
+⚠️ **The keys are still Excel header names.** SharePoint needs internal names, so `Legal entity`
+must become `Legal_x0020_entity`. Until the script emits internal names directly, this
+expression sends the wrong keys and SharePoint will reject the unknown ones. Send me the
+`fields?$select=Title,InternalName` output and I'll add the mapping to the script.
+
+---
+
+## 6. `Compose batch body`
+
+```
+concat(join(body('Select_update_parts'), ''), join(body('Select_create_parts'), ''), '--batch_', variables('varRunId'), '--')
+```
+
+`join` with an empty separator, because each part already ends with a newline. The trailing
+`--batch_<runId>--` closes the batch and is what SharePoint looks for to know the payload is
+complete — omit it and you get a 400 that says nothing useful.
+
+## 7. `Send batch`
+
+SharePoint → Send an HTTP request to SharePoint
+
+| Field | Value |
+|---|---|
+| Site Address | `https://deutschebank.sharepoint.com/sites/simri` |
+| Method | `POST` |
+| Uri | `_api/$batch` |
+| Headers | `Content-Type` : `multipart/mixed; boundary=batch_@{variables('varRunId')}` |
+| Body | `outputs('Compose_batch_body')` |
+
+The action's own Uri is **relative**. The `POST` lines *inside* the body must be **absolute**.
+Getting those the wrong way round is the most common 400 here.
+
+---
+
+## What it actually renders
+
+One update (Excel row 2 → item 1042) and one create (Excel row 4), with
+`varRunId` = `a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714`:
+
+```
+--batch_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714
+Content-Type: multipart/mixed; boundary=changeset_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714_2
+
+--changeset_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714_2
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST https://deutschebank.sharepoint.com/sites/simri/_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/items(1042) HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+IF-MATCH: *
+X-HTTP-Method: MERGE
+
+{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},"FirstName":"Ana","LastName":"Popescu","PhoneNr":"+40712345678","ICC_ID":"8935201234567890125","Status":"Active"}
+
+--changeset_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714_2--
+--batch_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714
+Content-Type: multipart/mixed; boundary=changeset_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714_4
+
+--changeset_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714_4
+Content-Type: application/http
+Content-Transfer-Encoding: binary
+
+POST https://deutschebank.sharepoint.com/sites/simri/_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/items HTTP/1.1
+Content-Type: application/json;odata=verbose
+Accept: application/json;odata=verbose
+
+{"__metadata":{"type":"SP.Data.Global_x0020_SIM_x0020_InventoryListItem"},"FirstName":"Elena","LastName":"Dumitru","PhoneNr":"+40745998877","ICC_ID":"8935201234567890992","Status":"Active"}
+
+--changeset_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714_4--
+--batch_a7f3c9e1-4b2d-4f8a-9c31-6de0f2a5b714--
+```
+
+Note the changeset suffixes `_2` and `_4` — those are the Excel row numbers. When you parse the
+response, they tell you which spreadsheet row each result belongs to. Without them you'd be
+matching responses to requests by position and hoping nothing reordered.
+
+---
+
+## Formatting rules that will silently 400 you
+
+- **Blank line after every header block.** One after `Content-Transfer-Encoding: binary`, one after the last request header, before the JSON body. Miss one and the parser reads your JSON as a header.
+- **No blank line between the boundary and the `Content-Type` that follows it.**
+- **CRLF line endings.** Power Automate's text-mode box produces these; hand-assembling with `\n` alone does not.
+- **Each changeset closes with `--`** (`--changeset_..._2--`) and so does the batch.
+- **Nothing after the final `--batch_<id>--`.** A trailing newline is tolerated; anything else isn't.
+
+## Test it with three rows
+
+Make the middle row deliberately invalid — a `Status` value the column rejects is easiest. Then
+confirm rows 1 and 3 still committed. If all three rolled back, your changesets aren't isolating
+and the per-row reporting the whole design rests on won't work.
+
+Do this before wiring up the response parser. Ten minutes now, versus discovering it at 60,000
+rows.
