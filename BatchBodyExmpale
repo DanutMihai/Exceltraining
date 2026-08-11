@@ -1,4 +1,36 @@
-# `Compose batch body` — worked example
+> ## ⚠️ SUPERSEDED — do not build sections 2–6 below
+>
+> The modern designer validates a `Select`'s text-mode map as JSON, so a raw multi-line
+> multipart body cannot be produced there. The `Apply to each` + `Append to string variable`
+> alternative is one append per row.
+>
+> **The script now builds the batch bodies instead.** `ValidateAndMatchImport` returns a
+> `batches` array where each entry is `{ boundary, body, rows }` — `body` is a complete
+> multipart payload, ready to POST verbatim. That also moved the field-name mapping and JSON
+> escaping into the script, where they are testable.
+>
+> Replace the two Filter arrays, the two Selects and the Compose with:
+>
+> ```
+> Apply to each   ->   body('Parse_result')?['batches']      (concurrency 1)
+>     Send batch  ->   SharePoint - Send an HTTP request to SharePoint
+>         Site      https://deutschebank.sharepoint.com/sites/simri
+>         Method    POST
+>         Uri       _api/$batch
+>         Headers   Content-Type: multipart/mixed; boundary=@{items('Apply_to_each')?['boundary']}
+>         Body      @{items('Apply_to_each')?['body']}
+> ```
+>
+> The script chunks at `batchConfig.batchSize`, so the inner `Do until — batches` and
+> `varBatchOffset` are gone too. `items('Apply_to_each')?['rows']` gives the Excel row numbers
+> in that batch, in order, for matching up the response.
+>
+> Keep reading below only for **§ What it actually renders** and **§ Formatting rules** — those
+> still describe what goes over the wire, and are what to diff against when a batch 400s.
+
+---
+
+# `Compose batch body` — worked example (superseded)
 
 Uses your real site, list GUID and entity type. The only literals are those three plus the
 boundary names; everything else comes from the decision objects the script returned.
