@@ -42,8 +42,23 @@ library holding the master template.
 _api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/fields?$select=Title,InternalName,TypeAsString&$filter=Hidden eq false and ReadOnlyField eq false
 ```
 
-You need this to fill `batchConfig.fieldMap` in §5a. A column missing from the map is silently
-not written.
+Fills `batchConfig.fieldMap` (§2a). A column missing from the map is silently not written.
+The completed 23-entry map for this list is in `payload_and_fieldmap.md`.
+
+**Check whether `Title` is required.**
+
+```
+_api/web/lists(guid'6b659861-abd0-4e45-b74e-63e3f69f2648')/fields?$select=InternalName,Required&$filter=InternalName eq 'Title'
+```
+
+If `Required` is `true`, every **create** fails with "Title field is required" unless the map
+supplies it. There is no `Title` column in `Table_query`, so map it to one you have:
+`{"excel":"LastName","internal":"Title","type":"Text"}`. Updates are unaffected — `MERGE`
+doesn't touch fields you don't send.
+
+**Confirm `StartDate`'s real type.** If the SharePoint column is a Date column it needs
+`"type":"DateTime"` in the map so the script converts `15-03-2026` to ISO 8601 — a Date column
+rejects the raw string. If `TypeAsString` says `Text`, leave it as `Text`.
 
 ---
 
@@ -80,6 +95,17 @@ Root level only; Power Automate rejects `Initialize variable` inside a Scope or 
 
 Five separate counters rather than one object: Power Automate can't increment a property inside
 an object variable, so an object means rebuilding the whole thing on every page.
+
+There is **no** `varBatchOffset`. An earlier design sliced decisions into batches inside the
+flow; the script does that now and returns ready-made batches. If you still have that variable
+or an inner `Do until — batches`, delete both.
+
+### 2a. Data Operation — `Compose field map`
+
+Root level, before `Scope - Main`. Static, so nothing gains from putting it inside a loop.
+
+Paste the 23-entry array from `payload_and_fieldmap.md`. Referenced by §5a as
+`outputs('Compose_field_map')`.
 
 ---
 
@@ -181,19 +207,24 @@ string(json(concat('{
 }')))
 ```
 
-Put the field map in a `Compose` named `Compose field map` at the top of the flow:
+The field map lives in the §2a Compose. The completed 23-entry version for this list — with the
+real internal names `Legalentity` and `SIMType`, not the `_x0020_` forms — is in
+`payload_and_fieldmap.md`.
 
-```json
-[
-  {"excel":"FirstName","internal":"FirstName","type":"Text"},
-  {"excel":"LastName","internal":"LastName","type":"Text"},
-  {"excel":"PhoneNr","internal":"PhoneNr","type":"Text"},
-  {"excel":"ICC_ID","internal":"ICC_ID","type":"Text"},
-  {"excel":"StartDate","internal":"StartDate","type":"DateTime"},
-  {"excel":"Legal entity","internal":"Legal_x0020_entity","type":"Text"},
-  {"excel":"SIM Type","internal":"SIM_x0020_Type","type":"Text"}
-]
-```
+`type` drives conversion: `DateTime` → ISO 8601, `Number`/`Currency` → numeric with blank as
+`null`, `Boolean` → true/false, `MultiChoice` → typed collection. Single-select `Choice` and
+everything else are sent as plain text, which is correct. `Lookup` and `User` columns throw with
+instructions — they need a numeric ID against a `<Field>Id` property, not a display string.
+
+**If `batchConfig` is missing or incomplete, the script throws.** That is deliberate: returning
+an empty `batches` array would leave the `Apply to each` with nothing to send, no rows written,
+and the run still reporting "3 updated" because the counts are tallied earlier. The error names
+exactly which key is absent.
+
+**`pageSize` at volume.** 2000 is right up to ~10,000 rows. Above that use 5000 — the script
+rescans three columns of the whole table on every call for cross-page duplicate detection, so
+fewer, larger pages cost less. At 60,000 rows: `pageSize` 2000 is 30 calls and 7.1M cells read;
+`pageSize` 5000 is 12 calls and 3.9M.
 
 Fill in all 20 from the §0 lookup. `type` drives conversion: `DateTime` → ISO 8601 (SharePoint
 rejects `15-03-2026`), `Number`/`Currency` → numeric with blank as `null`, `Boolean` →
@@ -447,7 +478,35 @@ targeting the same item are caught even when they are 40,000 rows apart on diffe
 Per-item `Create item` / `Update item` would be 60,000 calls — against a limit of 600 per
 connection per 60 seconds, that is 100 minutes of throttle budget before any latency.
 
-Longest single `Apply to each`: 20 iterations.
+Longest single `Apply to each`: 20 iterations. The 60,000 rows never enter a flow loop.
+
+### Expected duration
+
+| Rows | Script calls | Cells read | Script time |
+|---|---|---|---|
+| ≤ 1,000 | 1 | < 35K | ~3–5s |
+| 10,000 | 5 | 441K | ~30–60s |
+| 30,000 | 15 | 2.2M | ~2–5 min |
+| 60,000 | 30 | 7.1M | ~5–12 min |
+
+Below ~1,000 rows it is all fixed overhead — session startup and opening the workbook — so 3
+rows and 1,000 rows cost about the same.
+
+Two things dominate at volume, and neither is the script logic:
+
+- **Workbook recalculation on open.** Every Run script call opens the file, and the uploaded
+  workbook still carries the nine check columns. At 60,000 rows that is ~500,000 array formulas,
+  potentially recalculated 30 times. Applying `Nonvolatile_formulas.txt` matters here more than
+  anywhere else: with `ROW(INDIRECT(...))` still in the workbook, every recalculation
+  re-evaluates every row.
+- **The `$batch` POSTs.** ~600 sequential calls at 2–5s each is 20–50 minutes, likely longer
+  than all the script time combined. If that is the bottleneck, raise the `Apply to each`
+  concurrency to 4–8 and watch for 429s. Higher than that trips throttling and you lose more to
+  retries than you gain.
+
+Realistic end-to-end at 60,000 rows: **30–60 minutes**, mostly waiting on SharePoint. Measure
+rather than trust this table — the run history shows a duration per action, so one 10,000-row
+test gives you your real throughput.
 
 ---
 
