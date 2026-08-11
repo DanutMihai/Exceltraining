@@ -63,6 +63,8 @@ body{
 .meta div{padding:5px 0}
 .meta dt{font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--ink-3);font-weight:600}
 .meta dd{margin:2px 0 0;font-size:13.5px;font-variant-numeric:tabular-nums;word-break:break-word}
+.meta dd a{color:var(--blue-ink);text-decoration:none;border-bottom:1px solid var(--blue-line)}
+.meta dd a:hover{border-bottom-color:var(--blue-ink)}
 
 /* ============================================================== kpis ==== */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:14px;margin-bottom:18px}
@@ -326,7 +328,8 @@ function dur(a,b){
   else if(warned){ v.className = "verdict warn"; t.textContent = `Completed with ${warned} warning${warned>1?"s":""}`; }
   else { v.className = "verdict ok"; t.textContent = "Completed cleanly"; }
 
-  document.getElementById("meta").innerHTML = [
+  // [label, value, href?] - a third element renders the value as a link
+  const entries = [
     ["Source file", m.fileName],
     ["Country scope", m.country],
     ["Target list", m.listName],
@@ -335,8 +338,17 @@ function dur(a,b){
     ["Run by", m.operator],
     ["Validation gate", m.gate],
     ["Run ID", m.runId]
-  ].map(([k,val]) =>
-    `<div><dt>${esc(k)}</dt><dd>${esc(val || "—")}</dd></div>`).join("");
+  ];
+  // Optional. Lets whoever reads the report jump straight to the run history,
+  // which is the first thing anyone wants when a row failed.
+  if(m.flowUrl){ entries.push(["Flow run", m.flowName || "Open in Power Automate", m.flowUrl]); }
+  if(m.reportUrl){ entries.push(["This report", "Open saved copy", m.reportUrl]); }
+
+  document.getElementById("meta").innerHTML = entries.map(([k,val,href]) =>
+    `<div><dt>${esc(k)}</dt><dd>${
+      href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(val || "Open")}</a>`
+           : esc(val || "—")
+    }</dd></div>`).join("");
 })();
 
 /* ----------------------------------------------------------------- kpis */
