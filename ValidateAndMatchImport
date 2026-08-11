@@ -371,7 +371,38 @@ function main(workbook: ExcelScript.Workbook, payload: string): string {
  */
 function buildBatches(decisions: Decision[], cfg: BatchConfig): BatchRequest[] {
   const out: BatchRequest[] = [];
-  if (!cfg || decisions.length === 0) { return out; }
+  if (decisions.length === 0) { return out; }
+
+  // Fail loudly. Returning an empty array here is the worst possible outcome:
+  // the Apply to each finds nothing to send, no rows are written, and the run
+  // still reports "3 updated" because the counts were tallied before this
+  // point. A misconfigured payload must stop the flow, not produce a clean
+  // report about work that never happened.
+  if (!cfg) {
+    throw new Error(
+      "batchConfig is missing from the payload. " + decisions.length +
+      " rows were matched but no $batch bodies can be built, so nothing would " +
+      "be written. Add batchConfig (site, listGuid, entityType, runId, " +
+      "batchSize, fieldMap) to the Run script payload."
+    );
+  }
+  const missing: string[] = [];
+  if (!cfg.site) { missing.push("site"); }
+  if (!cfg.listGuid) { missing.push("listGuid"); }
+  if (!cfg.entityType) { missing.push("entityType"); }
+  if (!cfg.runId) { missing.push("runId"); }
+  if (missing.length > 0) {
+    throw new Error("batchConfig is incomplete - missing: " + missing.join(", ") +
+                    ". Received keys: " + Object.keys(cfg).join(", "));
+  }
+  if (!cfg.fieldMap || cfg.fieldMap.length === 0) {
+    throw new Error(
+      "batchConfig.fieldMap is empty. Every item body would contain only " +
+      "__metadata and no field values, so SharePoint would accept the writes " +
+      "and store nothing. Populate it from " +
+      "_api/web/lists(guid'...')/fields?$select=Title,InternalName,TypeAsString"
+    );
+  }
 
   const size: number = Math.max(1, Math.floor(cfg.batchSize || 100));
   const CRLF: string = "\r\n";
