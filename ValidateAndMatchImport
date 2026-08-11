@@ -471,6 +471,7 @@ function buildItemJson(
  */
 function convertValue(raw: string, type: string): unknown {
   const s: string = String(raw == null ? "" : raw).trim();
+
   if (type === "DateTime") {
     if (s === "") { return null; }
     return toIso(s);
@@ -483,6 +484,26 @@ function convertValue(raw: string, type: string): unknown {
   if (type === "Boolean") {
     const l: string = s.toLowerCase();
     return l === "true" || l === "yes" || l === "1" || l === "y";
+  }
+  if (type === "MultiChoice") {
+    // Multi-select choice columns need a typed collection, not a bare string.
+    // Single-select "Choice" does NOT - it takes the plain value, which is why
+    // it falls through to the text branch below.
+    const parts: string[] = s === "" ? [] : s.split(";");
+    const cleaned: string[] = [];
+    for (const p of parts) { if (p.trim() !== "") { cleaned.push(p.trim()); } }
+    return { "__metadata": { "type": "Collection(Edm.String)" }, "results": cleaned };
+  }
+  if (type === "Lookup" || type === "User" || type === "LookupMulti" || type === "UserMulti") {
+    // These take a numeric ID against a different property name (FieldId, not
+    // Field), so a display string here would 400 the whole batch. Fail with a
+    // message that says what to do instead.
+    throw new Error(
+      "fieldMap contains a " + type + " column. SharePoint needs its numeric ID " +
+      "written to the companion property - map it as {\"excel\":\"<header>\"," +
+      "\"internal\":\"<InternalName>Id\",\"type\":\"Number\"} and put the ID in " +
+      "that Excel column, or drop it from fieldMap to leave the field untouched."
+    );
   }
   return s;
 }
@@ -529,19 +550,30 @@ function scanTargets(
   const keyCounts: Map<string, number> = new Map<string, number>();
   if (totalDataRows <= 0) { return { idCounts, keyCounts }; }
 
-  const all: (string | number | boolean)[][] = sheet
-    .getRangeByIndexes(headerRowIndex + 1, firstColumn, totalDataRows, headers.length)
-    .getValues();
+  // Read the three columns individually rather than the whole table. Excel I/O
+  // dominates this script's runtime, and this scan runs on EVERY page - reading
+  // all 29 columns cost 29x more than necessary. At 60k rows over 30 pages that
+  // is 52 million cells instead of 5.4 million.
+  const readColumn = (name: string): string[] => {
+    const i: number = col[name];
+    const out: string[] = [];
+    if (i === undefined) { return out; }
+    const values: (string | number | boolean)[][] = sheet
+      .getRangeByIndexes(headerRowIndex + 1, firstColumn + i, totalDataRows, 1)
+      .getValues();
+    for (const row of values) { out.push(cellToText(row[0]).trim()); }
+    return out;
+  };
 
-  const iId: number = col["id"];
-  const iIcc: number = col["icc_id"];
-  const iPhone: number = col["phonenr"];
+  const ids: string[] = readColumn("id");
+  const iccs: string[] = readColumn("icc_id");
+  const phones: string[] = readColumn("phonenr");
 
-  for (const row of all) {
-    const id: string = iId === undefined ? "" : cellToText(row[iId]).trim();
+  for (let r = 0; r < totalDataRows; r++) {
+    const id: string = r < ids.length ? ids[r] : "";
     if (id !== "") { idCounts.set(id, (idCounts.get(id) || 0) + 1); }
-    const icc: string = iIcc === undefined ? "" : cellToText(row[iIcc]).trim();
-    const phone: string = iPhone === undefined ? "" : cellToText(row[iPhone]).trim();
+    const icc: string = r < iccs.length ? iccs[r] : "";
+    const phone: string = r < phones.length ? phones[r] : "";
     if (icc !== "" || phone !== "") {
       const k: string = matchKey(icc, phone);
       keyCounts.set(k, (keyCounts.get(k) || 0) + 1);
