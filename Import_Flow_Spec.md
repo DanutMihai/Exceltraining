@@ -93,6 +93,8 @@ Root level only; Power Automate rejects `Initialize variable` inside a Scope or 
 | `varWarning` | Integer | `0` |
 | `varSkipped` | Integer | `0` |
 | `varFailed` | Integer | `0` |
+| `varLogItemId` | Integer | `0` |
+| `varExceptions` | String | *(empty)* |
 
 Five separate counters rather than one object: Power Automate can't increment a property inside
 an object variable, so an object means rebuilding the whole thing on every page.
@@ -347,6 +349,7 @@ In order:
 | `Increment varSkipped` | `body('Parse_result')?['counts']?['skipped']` |
 | `Increment varFailed` | `body('Parse_result')?['counts']?['failed']` |
 | `Set varHasMore` | `body('Parse_result')?['hasMore']` |
+| `Append to varExceptions` | `@{body('Parse_result')?['exceptionsText']}@{if(empty(body('Parse_result')?['exceptionsText']),'',decodeUriComponent('%0D%0A'))}` |
 | `Increment varPage` | `1` |
 
 `union` merges in one action per page instead of one per row. It de-duplicates identical
@@ -439,13 +442,24 @@ would leave a dead, unfilterable table.
 
 ---
 
-## 8. `Create log item`
+## 8. Logging
 
-One item in an `Import Log` list: RunId, Country, ActionedBy, FileName, Started, Finished,
-Created, Updated, Warning, Skipped, Failed, ReportUrl, Status = `Completed`.
+Three log points, not one. Full column schema and every input is in `Logging_System.md`.
 
-Flow run history expires after 28 days on most plans. This list is what answers "who changed
-this SIM and when" a year later.
+| # | Where | Action |
+|---|---|---|
+| 1 | Before `Scope - Main`, after the variables | `Create item` · Status `Running` → sets `varLogItemId` |
+| 2 | Last action **inside** `Scope - Main`, before the email | `Update item` · Status `Completed` / `Completed with rejections` |
+| 3 | First action in `Scope - Catch` | `Update item` · Status `Failed` |
+
+**Create at the start, update at the end.** A run that times out, is cancelled, or whose catch
+scope itself fails reaches neither terminal action — with end-only logging it leaves no record
+at all, and those are precisely the runs worth investigating. Created first, the item exists
+from second one and simply stays at `Running`, which a "stuck runs" view then surfaces.
+
+Log point 2 sits **inside** the Scope. Outside it, a failure in the email step would leave the
+log claiming `Running` on a run that actually succeeded.
+
 
 ---
 

@@ -31,7 +31,6 @@ Scope - Main
     Get inventory · Shape inventory
     Do until - Pages   ( Run script → batches → counters )
     Build report · Save report
-    Select exception lines
   ┌──────────────────────────────────────────────┐
   │ LOG POINT 2 — Update item · Completed        │   ← last action INSIDE Scope - Main
   └──────────────────────────────────────────────┘
@@ -158,23 +157,27 @@ and **is skipped**, so a logging hiccup never blocks an import.
 
 ---
 
-## `Select exception lines` — before log point 2
+## Exceptions text — no `Select` action needed
 
-`join()` needs an array of strings, and there is **no `select()` expression** in Power Automate;
-`Select` exists only as a Data Operation action.
+The Select action's map is validated as JSON, so it cannot emit a bare string. Rather than work
+around that, the script returns the text ready-made.
 
-**Data Operation → Select**
+**Add a variable** (root level, §2): `varExceptions`, String, initial value empty.
 
-- **From:** `take(variables('varReportRows'),200)`
-- **Map:** switch to **text mode** (the `T` icon), single value:
+**In the page loop (§5d), after `Set varHasMore`**, add:
+
+**`Append to string variable`** — Name `varExceptions`, Value:
 
 ```
-@{item()?['action']} · row @{item()?['excelRow']} · @{item()?['message']}
+@{body('Parse_result')?['exceptionsText']}@{if(empty(body('Parse_result')?['exceptionsText']),'',decodeUriComponent('%0D%0A'))}
 ```
 
-Text mode makes the output an array of plain strings. In map mode you get an array of objects
-and `join()` fails. An empty `varReportRows` gives an empty array and `join()` returns `""`, so
-a clean import simply shows nothing under Exceptions.
+One append per page — 30 at 60,000 rows, not one per row. The trailing newline is only added
+when the page actually produced exceptions, so clean pages don't pad the value with blank lines.
+
+`exceptionsText` contains only **failed** and **warning** rows, whatever `reportDetail` is set
+to, capped at 200 lines per page with a "… and N more" notice. A log column does not want 60,000
+lines of "Item updated."
 
 ---
 
@@ -221,15 +224,15 @@ Source: @{variables('varFileName')}
 Run: @{variables('varRunId')}
 
 Exceptions:
-@{join(body('Select_exception_lines'), decodeUriComponent('%0D%0A'))}
+@{if(greater(length(variables('varExceptions')),60000),concat(substring(variables('varExceptions'),0,60000),decodeUriComponent('%0D%0A'),'… truncated, see the full report.'),variables('varExceptions'))}
 ```
 
 `decodeUriComponent('%0D%0A')` produces a line break — Power Automate rejects a literal newline
 inside an expression.
 
-`take(...,200)` caps the list. `varReportRows` holds only failed and warning rows, so it is
-normally short, but a badly broken file could produce thousands and a multi-line text column
-tops out at 63,999 characters. Full detail lives in the report.
+The `if(greater(length(...),60000),...)` guard is the last line of defence: the script caps at
+200 lines per page, but 30 pages of exceptions could still pass SharePoint's 63,999-character
+limit on a multi-line text column, and exceeding it fails the whole Update item.
 
 ---
 
@@ -269,8 +272,9 @@ is the number that tells you whether anything was written.
 `string(result('Scope_-_Main'))` returns the status and error of every action in the scope.
 Verbose, which is wrong for an email and right for a log.
 
-**Do not reference `body('Select_exception_lines')` here.** If the flow failed before that action
-ran, the reference is unresolvable and the catch's Update item fails too.
+**Do not reference any action inside `Scope - Main` here** — if the flow failed before it ran,
+the reference is unresolvable and the catch's Update item fails too. `varExceptions` is a
+variable, so it is always readable; it simply holds whatever accumulated before the failure.
 
 ### WorkHistory (catch)
 
