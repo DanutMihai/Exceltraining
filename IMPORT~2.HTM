@@ -337,11 +337,11 @@ function dur(a,b){
     ["Duration", dur(m.startedUtc, m.finishedUtc)],
     ["Run by", m.operator],
     ["Validation gate", m.gate],
-    ["Run ID", m.runId]
+    // The run ID doubles as the link to the run history - that is the first
+    // thing anyone wants when a row failed, and it saves a whole meta row.
+    // Falls back to plain text when flowUrl is absent.
+    ["Run ID", m.runId, m.flowUrl]
   ];
-  // Optional. Lets whoever reads the report jump straight to the run history,
-  // which is the first thing anyone wants when a row failed.
-  if(m.flowUrl){ entries.push(["Flow run", m.flowName || "Open in Power Automate", m.flowUrl]); }
   if(m.reportUrl){ entries.push(["This report", "Open saved copy", m.reportUrl]); }
 
   document.getElementById("meta").innerHTML = entries.map(([k,val,href]) =>
