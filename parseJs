@@ -1,0 +1,82 @@
+{
+  "type": "object",
+  "properties": {
+    "page": { "type": "integer" },
+    "pageSize": { "type": "integer" },
+    "totalDataRows": { "type": "integer" },
+    "rowsInPage": { "type": "integer" },
+    "hasMore": { "type": "boolean" },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "created": { "type": "integer" },
+        "updated": { "type": "integer" },
+        "warning": { "type": "integer" },
+        "skipped": { "type": "integer" },
+        "failed":  { "type": "integer" }
+      }
+    },
+    "skippedByCountry": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "country": { "type": "string" },
+          "rows": { "type": "integer" }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "excelRow": { "type": "integer" },
+          "action": { "type": "string" },
+          "spId": { "type": ["integer", "null"] },
+          "fields": { "type": "object" }
+        }
+      }
+    },
+    "reportRows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "excelRow": { "type": "integer" },
+          "action": { "type": "string" },
+          "name": { "type": "string" },
+          "iccId": { "type": "string" },
+          "phoneNr": { "type": "string" },
+          "simCountry": { "type": "string" },
+          "spId": { "type": ["integer", "null"] },
+          "matchedOn": { "type": "string" },
+          "message": { "type": "string" },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": { "type": "string" },
+                "from": { "type": "string" },
+                "to": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "batches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "boundary": { "type": "string" },
+          "body": { "type": "string" },
+          "rows": { "type": "array", "items": { "type": "integer" } }
+        }
+      }
+    },
+    "exceptionsText": { "type": "string" }
+  }
+}
