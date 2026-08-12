@@ -83,6 +83,7 @@ Root level only; Power Automate rejects `Initialize variable` inside a Scope or 
 | Name | Type | Initial value |
 |---|---|---|
 | `varRunId` | String | `guid()` |
+| `varStartedUtc` | String | `utcNow()` |
 | `varFileName` | String | `concat(formatDateTime(utcNow(),'yyyy-MM-dd_HH-mm-ss'),'_',triggerBody()?['text'],'_SIM_Import.xlsx')` |
 | `varPage` | Integer | `0` |
 | `varHasMore` | Boolean | `true` |
@@ -366,13 +367,36 @@ updated and skipped are counted but not listed — a 60,000-row import in `all` 
   "fileName": "@{variables('varFileName')}",
   "country": "@{triggerBody()?['text']}",
   "runId": "@{variables('varRunId')}",
-  "startedUtc": "@{triggerBody()?['headers']?['x-ms-workflow-run-start-time']}",
+  "startedUtc": "@{variables('varStartedUtc')}",
   "finishedUtc": "@{utcNow()}",
   "operator": "@{triggerBody()?['text_1']}",
   "listName": "Global SIM Inventory",
-  "gate": "@{if(equals(variables('varFailed'),0),'OK','BLOCKED')}"
+  "gate": "@{if(equals(variables('varFailed'),0),'OK','BLOCKED')}",
+  "flowUrl": "@{outputs('Compose_Flow_Identity')}"
 }
 ```
+
+`flowUrl` is **optional** and turns the **Run ID** into a hyperlink to the run history. Without
+it the Run ID renders as plain text, so an older meta block still works.
+
+**`startedUtc` must come from `varStartedUtc`, not from the trigger headers.** A PowerApps (V2)
+trigger doesn't populate `x-ms-workflow-run-start-time`, so that expression returns empty —
+which makes Started show `—` and Duration show `—` too, since it has nothing to subtract from.
+Initialising a variable to `utcNow()` at the top of the flow is the reliable source.
+
+`reportUrl` is also supported and renders as "This report → Open saved copy". It has to come
+*after* `Save report`, so either move `Compose report meta` below it, or add the property with a
+second Compose and merge — the simplest option is to leave `reportUrl` out and put the link in
+the email body instead.
+
+If you build the URL yourself rather than using an existing Compose:
+
+```
+concat('https://make.powerautomate.com/environments/<envId>/flows/',
+       workflow()?['name'], '/runs/', workflow()?['run']?['name'])
+```
+
+`workflow()?['name']` is the flow GUID and `workflow()?['run']?['name']` the run ID.
 
 **`Compose report json`**
 
