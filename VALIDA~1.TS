@@ -461,15 +461,22 @@ function buildBatches(decisions: Decision[], cfg: BatchConfig): BatchRequest[] {
       body += "--" + cs + CRLF;
       body += "Content-Type: application/http" + CRLF;
       body += "Content-Transfer-Encoding: binary" + CRLF + CRLF;
-      body += "POST " + url + " HTTP/1.1" + CRLF;
+      // The verb goes on the request line. Inside a $batch you must use MERGE
+      // directly - "POST" plus an X-HTTP-Method: MERGE header is an HTTP-level
+      // tunnel that SharePoint only honours on standalone requests. In a batch
+      // sub-request it is ignored, so SharePoint sees POST to items(1042),
+      // resolves that as calling the METHOD GetById(1042), and tries to bind the
+      // JSON body as method parameters:
+      //     "The parameter __metadata does not exist in method GetById."
+      // MERGE, never PUT: PUT blanks every field absent from the payload.
+      body += (isUpdate ? "MERGE " : "POST ") + url + " HTTP/1.1" + CRLF;
       body += "Content-Type: application/json;odata=verbose" + CRLF;
       body += "Accept: application/json;odata=verbose" + CRLF;
       if (isUpdate) {
-        // IF-MATCH * overwrites regardless of version. Swap in the item's etag
-        // if a concurrent edit should fail rather than be silently overwritten.
+        // Required by MERGE. "*" overwrites regardless of version; send the
+        // item's etag instead if a concurrent edit should fail rather than be
+        // silently overwritten.
         body += "IF-MATCH: *" + CRLF;
-        // MERGE, never PUT: PUT blanks every field not present in the payload.
-        body += "X-HTTP-Method: MERGE" + CRLF;
       }
       body += CRLF;
       body += buildItemJson(d.fields, cfg) + CRLF + CRLF;
