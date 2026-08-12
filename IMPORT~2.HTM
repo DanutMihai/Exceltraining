@@ -185,6 +185,8 @@ tbody tr.r-warning:hover td{background:#fffaea}
 .chg .to{color:var(--green-ink);font-weight:600}
 .chg .arrow{color:var(--ink-3);margin:0 5px}
 
+.note{padding:11px 18px;background:#fffdf4;border-bottom:1px solid var(--amber-line);
+  font-size:12.5px;color:var(--amber-ink)}
 .empty{padding:56px 20px;text-align:center;color:var(--ink-3)}
 .empty b{display:block;color:var(--ink-2);font-size:15px;margin-bottom:5px}
 
@@ -318,7 +320,18 @@ let sortKey = "excelRow", sortDir = 1;
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const count = a => rows.filter(r => r.action === a).length;
+
+/* True totals come from REPORT.counts, NOT from rows.
+   The flow may send only the exception rows (reportDetail: "exceptions"), in
+   which case a clean import has an empty rows array — deriving the totals from
+   it would report zero across the board on a perfectly good run.
+   Falls back to counting rows when counts is absent, so an older payload that
+   sends every row still works. */
+const C      = REPORT.counts || null;
+const listed = a => rows.filter(r => r.action === a).length;   // in the table
+const count  = a => C ? (Number(C[a]) || 0) : listed(a);       // in reality
+const TOTAL  = C ? ORDER.reduce((s,a) => s + count(a), 0) : rows.length;
+const PARTIAL = C && rows.length < TOTAL;   // exceptions-only payload
 
 function fmt(iso){
   if(!iso) return "—";
@@ -335,7 +348,7 @@ function dur(a,b){
 (function header(){
   const m = REPORT.meta || {};
   document.getElementById("subtitle").textContent =
-    `${m.listName || "SharePoint list"} · scoped to ${m.country || "—"} · ${rows.length} rows in file`;
+    `${m.listName || "SharePoint list"} · scoped to ${m.country || "—"} · ${TOTAL} rows in file`;
 
   const failed = count("failed"), warned = count("warning");
   const v = document.getElementById("verdict"), t = document.getElementById("verdictText");
@@ -382,7 +395,7 @@ function dur(a,b){
 
 /* ----------------------------------------------------------------- kpis */
 (function kpis(){
-  const cards = [["total","Rows in file",rows.length]]
+  const cards = [["total","Rows in file",TOTAL]]
     .concat(ORDER.map(a => [a, LABEL[a], count(a)]));
   document.getElementById("kpis").innerHTML = cards.map(([k,l,n]) =>
     `<button class="kpi ${k}" type="button" data-a="${k}" aria-pressed="false">
@@ -399,8 +412,8 @@ function dur(a,b){
 
 /* ---------------------------------------------------------- composition */
 (function compo(){
-  const t = rows.length || 1;
-  document.getElementById("compoTotal").textContent = `${rows.length} rows`;
+  const t = TOTAL || 1;
+  document.getElementById("compoTotal").textContent = `${TOTAL} rows`;
   document.getElementById("bar").innerHTML = ORDER.map(a =>
     `<span class="s-${a}" style="width:${count(a)/t*100}%" title="${LABEL[a]}: ${count(a)}"></span>`).join("");
   document.getElementById("legend").innerHTML = ORDER.map(a =>
@@ -410,9 +423,11 @@ function dur(a,b){
 })();
 
 /* ---------------------------------------------------------------- chips */
+// Chips carry the LISTED count, not the true total — they filter the table
+// below, and a chip reading 3 that reveals nothing would be a lie.
 document.getElementById("chips").innerHTML = ORDER.map(a =>
   `<button class="chip" type="button" data-a="${a}" aria-pressed="true">
-     ${LABEL[a]} <span class="c">${count(a)}</span></button>`).join("");
+     ${LABEL[a]} <span class="c">${listed(a)}</span></button>`).join("");
 
 document.getElementById("chips").addEventListener("click", e => {
   const b = e.target.closest(".chip"); if(!b) return;
@@ -470,7 +485,12 @@ function render(list){
     </tr>`;
   }).join("");
 
-  document.getElementById("empty").hidden = list.length > 0;
+  const emptyEl = document.getElementById("empty");
+  emptyEl.hidden = list.length > 0;
+  if(!list.length && PARTIAL && !document.getElementById("q").value){
+    emptyEl.innerHTML = "<b>Nothing to report</b>This run produced no failures or warnings. "
+      + "Rows that completed normally are counted above but not listed.";
+  }
   document.getElementById("count").textContent =
     `Showing ${list.length} of ${rows.length} rows`;
 }
@@ -483,6 +503,16 @@ function sync(){
       c.dataset.a !== "total" && active.size === 1 && active.has(c.dataset.a)));
   render(visible());
 }
+
+// Say plainly why the cards above can total more than the table below.
+(function partialNotice(){
+  if(!PARTIAL) return;
+  const hidden = TOTAL - rows.length;
+  const el = document.getElementById("note");
+  el.hidden = false;
+  el.textContent = `Listing exceptions only — ${hidden} row${hidden===1?"":"s"} `
+    + `completed without incident and are counted above but not listed individually.`;
+})();
 
 document.getElementById("q").addEventListener("input", sync);
 
