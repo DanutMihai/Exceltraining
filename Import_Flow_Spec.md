@@ -404,8 +404,25 @@ concat('https://make.powerautomate.com/environments/<envId>/flows/',
 **`Compose report json`**
 
 ```
-{ "meta": @{outputs('Compose_report_meta')}, "rows": @{variables('varReportRows')} }
+{
+  "meta": @{outputs('Compose_report_meta')},
+  "counts": {
+    "created": @{variables('varCreated')},
+    "updated": @{variables('varUpdated')},
+    "warning": @{variables('varWarning')},
+    "skipped": @{variables('varSkipped')},
+    "failed":  @{variables('varFailed')}
+  },
+  "rows": @{variables('varReportRows')}
+}
 ```
+
+⚠️ **`counts` is required.** The template takes every KPI number, the composition bar and the
+"rows in file" total from it. With `reportDetail: "exceptions"` a clean run sends an empty `rows`
+array, so a template deriving totals from `rows` would show zero across the board on a perfectly
+successful import. The chips beside the search box deliberately still count `rows`, because they
+filter the table — a chip reading 3 that reveals nothing would be a lie — and a banner explains
+the difference.
 
 **`Get report template`** — SharePoint Get file content → `Import_Report_Template.html`
 

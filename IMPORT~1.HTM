@@ -61,10 +61,25 @@ body{
   gap:2px 26px;width:100%;border-top:1px solid var(--line-soft);padding-top:18px;margin-top:4px;
 }
 .meta div{padding:5px 0}
-.meta dt{font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--ink-3);font-weight:600}
+.meta dt{display:flex;align-items:center;gap:6px;font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--ink-3);font-weight:600}
 .meta dd{margin:2px 0 0;font-size:13.5px;font-variant-numeric:tabular-nums;word-break:break-word}
 .meta dd a{color:var(--blue-ink);text-decoration:none;border-bottom:1px solid var(--blue-line)}
 .meta dd a:hover{border-bottom-color:var(--blue-ink)}
+.info{position:relative;display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;border-radius:50%;border:1px solid var(--ink-3);color:var(--ink-3);
+  font-size:9.5px;font-weight:700;font-style:normal;letter-spacing:0;text-transform:none;
+  cursor:help;flex:none}
+.info:hover,.info:focus{border-color:var(--ink);color:var(--ink);outline:none}
+.info .tip{position:absolute;right:-6px;top:22px;z-index:30;width:300px;display:none;
+  background:var(--ink);color:#fff;padding:11px 13px;border-radius:9px;
+  font-size:12px;font-weight:400;line-height:1.55;letter-spacing:0;text-transform:none;
+  text-align:left;box-shadow:0 12px 28px -10px rgba(16,24,40,.45)}
+.info .tip::before{content:"";position:absolute;top:-5px;right:9px;width:9px;height:9px;
+  background:var(--ink);transform:rotate(45deg)}
+.info:hover .tip,.info:focus .tip{display:block}
+.info .tip b{font-weight:650}
+.info .tip .ok{color:#8ee0a6}
+.info .tip .bad{color:#ffb3bb}
 
 /* ============================================================== kpis ==== */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:14px;margin-bottom:18px}
@@ -170,6 +185,8 @@ tbody tr.r-warning:hover td{background:#fffaea}
 .chg .to{color:var(--green-ink);font-weight:600}
 .chg .arrow{color:var(--ink-3);margin:0 5px}
 
+.note{padding:11px 18px;background:#fffdf4;border-bottom:1px solid var(--amber-line);
+  font-size:12.5px;color:var(--amber-ink)}
 .empty{padding:56px 20px;text-align:center;color:var(--ink-3)}
 .empty b{display:block;color:var(--ink-2);font-size:15px;margin-bottom:5px}
 
@@ -194,7 +211,7 @@ tbody tr.r-warning:hover td{background:#fffaea}
 /* ============================================================= print ==== */
 @media print{
   body{background:#fff;padding:0}
-  .toolbar,.kpi:hover{display:none}
+  .toolbar,.kpi:hover,.info .tip{display:none}
   .panel,.head,.kpi,.compo{box-shadow:none;border-color:#d0d7e2;break-inside:avoid}
   tbody tr{break-inside:avoid}
   thead th{position:static}
@@ -302,10 +319,10 @@ const REPORT = {
     operator:"danutmihai.ilie@gmail.com",
     listName:"SIM Inventory",
     gate:"OK",
-    flowName:"SIM Inventory Import",
     flowUrl:"https://make.powerautomate.com/environments/Default-abc/flows/1234-5678/runs/08584...",
     reportUrl:"https://deutschebank.sharepoint.com/sites/simri/SIM%20Imports/Reports/report.html"
   },
+  counts:{created:3, updated:4, warning:2, skipped:3, failed:4},
   rows:[
     {excelRow:2, action:"updated", name:"Ana Popescu", iccId:"8935201234567890125", phoneNr:"+40712345678",
      simCountry:"Romania", spId:1042, matchedOn:"ICC_ID + PhoneNr",
@@ -388,7 +405,18 @@ let sortKey = "excelRow", sortDir = 1;
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const count = a => rows.filter(r => r.action === a).length;
+
+/* True totals come from REPORT.counts, NOT from rows.
+   The flow may send only the exception rows (reportDetail: "exceptions"), in
+   which case a clean import has an empty rows array — deriving the totals from
+   it would report zero across the board on a perfectly good run.
+   Falls back to counting rows when counts is absent, so an older payload that
+   sends every row still works. */
+const C      = REPORT.counts || null;
+const listed = a => rows.filter(r => r.action === a).length;   // in the table
+const count  = a => C ? (Number(C[a]) || 0) : listed(a);       // in reality
+const TOTAL  = C ? ORDER.reduce((s,a) => s + count(a), 0) : rows.length;
+const PARTIAL = C && rows.length < TOTAL;   // exceptions-only payload
 
 function fmt(iso){
   if(!iso) return "—";
@@ -405,7 +433,7 @@ function dur(a,b){
 (function header(){
   const m = REPORT.meta || {};
   document.getElementById("subtitle").textContent =
-    `${m.listName || "SharePoint list"} · scoped to ${m.country || "—"} · ${rows.length} rows in file`;
+    `${m.listName || "SharePoint list"} · scoped to ${m.country || "—"} · ${TOTAL} rows in file`;
 
   const failed = count("failed"), warned = count("warning");
   const v = document.getElementById("verdict"), t = document.getElementById("verdictText");
@@ -413,7 +441,18 @@ function dur(a,b){
   else if(warned){ v.className = "verdict warn"; t.textContent = `Completed with ${warned} warning${warned>1?"s":""}`; }
   else { v.className = "verdict ok"; t.textContent = "Completed cleanly"; }
 
-  // [label, value, href?] - a third element renders the value as a link
+  // Author-controlled markup, never data from REPORT - so it is not escaped.
+  const GATE_HINT =
+    '<b class="ok">OK</b> — no row failed validation and every write was accepted. '
+  + 'The import is complete.<br><br>'
+  + '<b class="bad">BLOCKED</b> — at least one row was rejected. Those rows were '
+  + '<b>not</b> written; everything else was. Fix them in the workbook and re-import: '
+  + 'rows that already landed will match on their ID and update rather than duplicate.'
+  + '<br><br>Warnings do not block. A row can be written and still carry one — a failed '
+  + 'Luhn check digit, for instance.';
+
+  // [label, value, href?, hintHtml?] - href makes the value a link,
+  // hint adds an (i) next to the label
   const entries = [
     ["Source file", m.fileName],
     ["Country scope", m.country],
@@ -421,16 +460,19 @@ function dur(a,b){
     ["Started", fmt(m.startedUtc)],
     ["Duration", dur(m.startedUtc, m.finishedUtc)],
     ["Run by", m.operator],
-    ["Validation gate", m.gate],
-    ["Run ID", m.runId]
+    ["Validation gate", m.gate, null, GATE_HINT],
+    // The run ID doubles as the link to the run history - that is the first
+    // thing anyone wants when a row failed, and it saves a whole meta row.
+    // Falls back to plain text when flowUrl is absent.
+    ["Run ID", m.runId, m.flowUrl]
   ];
-  // Optional. Lets whoever reads the report jump straight to the run history,
-  // which is the first thing anyone wants when a row failed.
-  if(m.flowUrl){ entries.push(["Flow run", m.flowName || "Open in Power Automate", m.flowUrl]); }
   if(m.reportUrl){ entries.push(["This report", "Open saved copy", m.reportUrl]); }
 
-  document.getElementById("meta").innerHTML = entries.map(([k,val,href]) =>
-    `<div><dt>${esc(k)}</dt><dd>${
+  document.getElementById("meta").innerHTML = entries.map(([k,val,href,hint]) =>
+    `<div><dt>${esc(k)}${
+      hint ? `<span class="info" tabindex="0" role="note" aria-label="${esc(k)}, explained"
+                    >i<span class="tip">${hint}</span></span>` : ""
+    }</dt><dd>${
       href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(val || "Open")}</a>`
            : esc(val || "—")
     }</dd></div>`).join("");
@@ -438,7 +480,7 @@ function dur(a,b){
 
 /* ----------------------------------------------------------------- kpis */
 (function kpis(){
-  const cards = [["total","Rows in file",rows.length]]
+  const cards = [["total","Rows in file",TOTAL]]
     .concat(ORDER.map(a => [a, LABEL[a], count(a)]));
   document.getElementById("kpis").innerHTML = cards.map(([k,l,n]) =>
     `<button class="kpi ${k}" type="button" data-a="${k}" aria-pressed="false">
@@ -455,8 +497,8 @@ function dur(a,b){
 
 /* ---------------------------------------------------------- composition */
 (function compo(){
-  const t = rows.length || 1;
-  document.getElementById("compoTotal").textContent = `${rows.length} rows`;
+  const t = TOTAL || 1;
+  document.getElementById("compoTotal").textContent = `${TOTAL} rows`;
   document.getElementById("bar").innerHTML = ORDER.map(a =>
     `<span class="s-${a}" style="width:${count(a)/t*100}%" title="${LABEL[a]}: ${count(a)}"></span>`).join("");
   document.getElementById("legend").innerHTML = ORDER.map(a =>
@@ -466,9 +508,11 @@ function dur(a,b){
 })();
 
 /* ---------------------------------------------------------------- chips */
+// Chips carry the LISTED count, not the true total — they filter the table
+// below, and a chip reading 3 that reveals nothing would be a lie.
 document.getElementById("chips").innerHTML = ORDER.map(a =>
   `<button class="chip" type="button" data-a="${a}" aria-pressed="true">
-     ${LABEL[a]} <span class="c">${count(a)}</span></button>`).join("");
+     ${LABEL[a]} <span class="c">${listed(a)}</span></button>`).join("");
 
 document.getElementById("chips").addEventListener("click", e => {
   const b = e.target.closest(".chip"); if(!b) return;
@@ -526,7 +570,12 @@ function render(list){
     </tr>`;
   }).join("");
 
-  document.getElementById("empty").hidden = list.length > 0;
+  const emptyEl = document.getElementById("empty");
+  emptyEl.hidden = list.length > 0;
+  if(!list.length && PARTIAL && !document.getElementById("q").value){
+    emptyEl.innerHTML = "<b>Nothing to report</b>This run produced no failures or warnings. "
+      + "Rows that completed normally are counted above but not listed.";
+  }
   document.getElementById("count").textContent =
     `Showing ${list.length} of ${rows.length} rows`;
 }
@@ -539,6 +588,16 @@ function sync(){
       c.dataset.a !== "total" && active.size === 1 && active.has(c.dataset.a)));
   render(visible());
 }
+
+// Say plainly why the cards above can total more than the table below.
+(function partialNotice(){
+  if(!PARTIAL) return;
+  const hidden = TOTAL - rows.length;
+  const el = document.getElementById("note");
+  el.hidden = false;
+  el.textContent = `Listing exceptions only — ${hidden} row${hidden===1?"":"s"} `
+    + `completed without incident and are counted above but not listed individually.`;
+})();
 
 document.getElementById("q").addEventListener("input", sync);
 
