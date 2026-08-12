@@ -61,10 +61,25 @@ body{
   gap:2px 26px;width:100%;border-top:1px solid var(--line-soft);padding-top:18px;margin-top:4px;
 }
 .meta div{padding:5px 0}
-.meta dt{font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--ink-3);font-weight:600}
+.meta dt{display:flex;align-items:center;gap:6px;font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--ink-3);font-weight:600}
 .meta dd{margin:2px 0 0;font-size:13.5px;font-variant-numeric:tabular-nums;word-break:break-word}
 .meta dd a{color:var(--blue-ink);text-decoration:none;border-bottom:1px solid var(--blue-line)}
 .meta dd a:hover{border-bottom-color:var(--blue-ink)}
+.info{position:relative;display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;border-radius:50%;border:1px solid var(--ink-3);color:var(--ink-3);
+  font-size:9.5px;font-weight:700;font-style:normal;letter-spacing:0;text-transform:none;
+  cursor:help;flex:none}
+.info:hover,.info:focus{border-color:var(--ink);color:var(--ink);outline:none}
+.info .tip{position:absolute;right:-6px;top:22px;z-index:30;width:300px;display:none;
+  background:var(--ink);color:#fff;padding:11px 13px;border-radius:9px;
+  font-size:12px;font-weight:400;line-height:1.55;letter-spacing:0;text-transform:none;
+  text-align:left;box-shadow:0 12px 28px -10px rgba(16,24,40,.45)}
+.info .tip::before{content:"";position:absolute;top:-5px;right:9px;width:9px;height:9px;
+  background:var(--ink);transform:rotate(45deg)}
+.info:hover .tip,.info:focus .tip{display:block}
+.info .tip b{font-weight:650}
+.info .tip .ok{color:#8ee0a6}
+.info .tip .bad{color:#ffb3bb}
 
 /* ============================================================== kpis ==== */
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:14px;margin-bottom:18px}
@@ -194,7 +209,7 @@ tbody tr.r-warning:hover td{background:#fffaea}
 /* ============================================================= print ==== */
 @media print{
   body{background:#fff;padding:0}
-  .toolbar,.kpi:hover{display:none}
+  .toolbar,.kpi:hover,.info .tip{display:none}
   .panel,.head,.kpi,.compo{box-shadow:none;border-color:#d0d7e2;break-inside:avoid}
   tbody tr{break-inside:avoid}
   thead th{position:static}
@@ -328,7 +343,18 @@ function dur(a,b){
   else if(warned){ v.className = "verdict warn"; t.textContent = `Completed with ${warned} warning${warned>1?"s":""}`; }
   else { v.className = "verdict ok"; t.textContent = "Completed cleanly"; }
 
-  // [label, value, href?] - a third element renders the value as a link
+  // Author-controlled markup, never data from REPORT - so it is not escaped.
+  const GATE_HINT =
+    '<b class="ok">OK</b> — no row failed validation and every write was accepted. '
+  + 'The import is complete.<br><br>'
+  + '<b class="bad">BLOCKED</b> — at least one row was rejected. Those rows were '
+  + '<b>not</b> written; everything else was. Fix them in the workbook and re-import: '
+  + 'rows that already landed will match on their ID and update rather than duplicate.'
+  + '<br><br>Warnings do not block. A row can be written and still carry one — a failed '
+  + 'Luhn check digit, for instance.';
+
+  // [label, value, href?, hintHtml?] - href makes the value a link,
+  // hint adds an (i) next to the label
   const entries = [
     ["Source file", m.fileName],
     ["Country scope", m.country],
@@ -336,7 +362,7 @@ function dur(a,b){
     ["Started", fmt(m.startedUtc)],
     ["Duration", dur(m.startedUtc, m.finishedUtc)],
     ["Run by", m.operator],
-    ["Validation gate", m.gate],
+    ["Validation gate", m.gate, null, GATE_HINT],
     // The run ID doubles as the link to the run history - that is the first
     // thing anyone wants when a row failed, and it saves a whole meta row.
     // Falls back to plain text when flowUrl is absent.
@@ -344,8 +370,11 @@ function dur(a,b){
   ];
   if(m.reportUrl){ entries.push(["This report", "Open saved copy", m.reportUrl]); }
 
-  document.getElementById("meta").innerHTML = entries.map(([k,val,href]) =>
-    `<div><dt>${esc(k)}</dt><dd>${
+  document.getElementById("meta").innerHTML = entries.map(([k,val,href,hint]) =>
+    `<div><dt>${esc(k)}${
+      hint ? `<span class="info" tabindex="0" role="note" aria-label="${esc(k)}, explained"
+                    >i<span class="tip">${hint}</span></span>` : ""
+    }</dt><dd>${
       href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(val || "Open")}</a>`
            : esc(val || "—")
     }</dd></div>`).join("");
